@@ -62,6 +62,10 @@ precmd_functions+=(_reset_cursor_bar)
       { "matcher": "AskUserQuestion", "hooks": [ { "type": "command",
         "command": "$HOME/.tmux/plugins/tmux-claude-session-manager/scripts/state.sh waiting" } ] }
     ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command",
+        "command": "$HOME/.tmux/plugins/tmux-claude-session-manager/scripts/state.sh working" } ] }
+    ],
     "Stop": [
       { "matcher": "", "hooks": [ { "type": "command",
         "command": "$HOME/.tmux/plugins/tmux-claude-session-manager/scripts/state.sh idle" } ] }
@@ -70,9 +74,9 @@ precmd_functions+=(_reset_cursor_bar)
 }
 ```
 
-상태 머신: `UserPromptSubmit`=working, `Notification`(permission)=waiting, `PreToolUse`(AskUserQuestion)=waiting, `Stop`=idle.
+상태 머신: `UserPromptSubmit`=working, `Notification`(permission)=waiting, `PreToolUse`(AskUserQuestion)=waiting, `PostToolUse`(matcher 없음 = 모든 tool 완료)=working, `Stop`=idle.
 
-> **미해결 이슈:** AskUserQuestion 60s 타임아웃 취소 후 재프롬프트 시 상태가 `waiting`에 머무는 케이스 있음. 원인 미확정 (Notion 참고).
+> **PostToolUse=working 이유:** AskUserQuestion 응답/취소는 `UserPromptSubmit`을 안 켜서 `waiting`에 머묾. tool 완료 시마다 working으로 flip해 해소. matcher 생략 = 모든 tool 대상.
 
 ## 키바인드 (fork 추가분)
 
