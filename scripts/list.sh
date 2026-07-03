@@ -9,6 +9,9 @@ prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
 w="$(get_tmux_option @claude_popup_width '90%')"
 h="$(get_tmux_option @claude_popup_height '90%')"
 
+# The client the key binding was pressed on (passed as '#{client_name}').
+client="${1:-}"
+
 # The session of a client attached to a prefixed session — i.e. the popup we are
 # inside, if any. Empty when invoked from a normal (non-popup) pane.
 nested_session() {
@@ -34,7 +37,17 @@ if [ -n "$sess" ]; then
   done
 fi
 
-host="$(host_client)"
+# Prefer the invoking client when it isn't a popup client — with several outer
+# clients attached, the blind scan below can pick another terminal's client and
+# the picker appears on the wrong window. From inside a popup the invoking
+# client is the (now detached) popup client, so the filter rejects it and we
+# fall back to the scan.
+host=""
+if [ -n "$client" ]; then
+  host="$(tmux list-clients -F '#{client_name} #{session_name}' 2>/dev/null |
+    awk -v c="$client" -v p="$prefix" '$1 == c && index($2, p) != 1 { print $1; exit }')"
+fi
+[ -n "$host" ] || host="$(host_client)"
 tmux set-option -g @claude_parent "$host"
 
 # Host the picker on the outer client. -c is honored because that client has no
