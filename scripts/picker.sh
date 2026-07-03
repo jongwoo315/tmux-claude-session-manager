@@ -71,7 +71,15 @@ target=$(printf '%s' "$sel" | LC_ALL=C cut -f2)
 # current window when origin/parent are unknown.
 origin=$(tmux show-options -qv -t "$target" @claude_origin 2>/dev/null)
 parent=$(tmux show-options -gqv @claude_parent 2>/dev/null)
-[ -n "$origin" ] && [ -n "$parent" ] &&
-  tmux switch-client -c "$parent" -t "$origin" 2>/dev/null
+if [ -n "$origin" ] && [ -n "$parent" ]; then
+  # Only relocate within the same session. All claude sessions share one origin
+  # window, so an unconditional switch-client yanks the parent client across
+  # sessions (e.g. aux -> orch) — a jarring, unexpected jump. Skip when the origin
+  # window lives in a different session than the parent client is currently on.
+  psess=$(tmux display-message -p -c "$parent" '#{session_name}' 2>/dev/null)
+  osess=$(tmux display-message -p -t "$origin" '#{session_name}' 2>/dev/null)
+  [ -n "$osess" ] && [ "$psess" = "$osess" ] &&
+    tmux switch-client -c "$parent" -t "$origin" 2>/dev/null
+fi
 
 tmux attach-session -t "$target"
