@@ -47,6 +47,15 @@ if [ -n "$client" ]; then
   host="$(tmux list-clients -F '#{client_name} #{session_name}' 2>/dev/null |
     awk -v c="$client" -v p="$prefix" '$1 == c && index($2, p) != 1 { print $1; exit }')"
 fi
+# From inside a popup the invoking client is the (now detached) popup client, so
+# $host is still empty. That popup was hosted on @claude_parent (set when the
+# picker opened); prefer it so the picker reopens on the SAME terminal instead of
+# a blind scan that may land on another client attached to the same session.
+if [ -z "$host" ]; then
+  parent="$(tmux show-options -gqv @claude_parent 2>/dev/null)"
+  [ -n "$parent" ] && host="$(tmux list-clients -F '#{client_name} #{session_name}' 2>/dev/null |
+    awk -v c="$parent" -v p="$prefix" '$1 == c && index($2, p) != 1 { print $1; exit }')"
+fi
 [ -n "$host" ] || host="$(host_client)"
 tmux set-option -g @claude_parent "$host"
 
