@@ -11,6 +11,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
 
+# Extract a top-level JSON string field from a small file (no jq dependency).
+#   json_str <file> <key>  ->  the string value, or empty.
+json_str() {
+  LC_ALL=C /usr/bin/grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null |
+    head -1 | sed -E "s/^\"$2\"[[:space:]]*:[[:space:]]*\"(.*)\"\$/\1/"
+}
+
 emit_rows() {
   local now s state at path icon rank ago title
   now=$(date +%s)
@@ -18,15 +25,24 @@ emit_rows() {
     state=$(tmux show-options -qv -t "$s" @claude_state 2>/dev/null)
     at=$(tmux show-options -qv -t "$s" @claude_state_at 2>/dev/null)
     path=$(tmux display-message -p -t "$s" '#{pane_current_path}' 2>/dev/null)
-    # Human label: prefer the name Claude sets via /rename (or --name), which it
-    # emits as the terminal title — tmux exposes it as pane_title, prefixed with a
-    # status glyph ("✳ name"). Strip exactly one leading char + spaces in a UTF-8
-    # locale so the glyph goes but non-ASCII names survive. Falls back to a legacy
-    # @claude_title, then the dir basename.
-    title=$(tmux display-message -p -t "$s" '#{pane_title}' 2>/dev/null |
-      LC_ALL=en_US.UTF-8 sed -E 's/^.[[:space:]]+//')
-    [ -z "$title" ] && title=$(tmux show-options -qv -t "$s" @claude_title 2>/dev/null)
-    [ -z "$title" ] && title="${path##*/}"
+    # Human label. Claude records each running session in
+    # ~/.claude/sessions/<pid>.json with a "name" and a "nameSource": a name the
+    # user set (via --name or /rename) has NO nameSource, while an auto-derived
+    # name is tagged "nameSource":"derived". Show the name only when it's explicit;
+    # for derived/unnamed sessions fall back to the launcher's @claude_title
+    # (dir#N) and finally the dir basename. pane_pid is Claude's pid because the
+    # popup runs claude as the pane's root process. (pane_title is avoided: for an
+    # unnamed session it holds Claude's auto-summary, not the dir label.)
+    pid=$(tmux display-message -p -t "$s" '#{pane_pid}' 2>/dev/null)
+    sfile="$HOME/.claude/sessions/${pid}.json"
+    title=""
+    if [ -r "$sfile" ] && [ "$(json_str "$sfile" nameSource)" != "derived" ]; then
+      title=$(json_str "$sfile" name)
+    fi
+    if [ -z "$title" ]; then
+      title=$(tmux show-options -qv -t "$s" @claude_title 2>/dev/null)
+      [ -z "$title" ] && title="${path##*/}"
+    fi
     case "$state" in
     waiting) icon=$'\033[33m●\033[0m waiting' rank=0 ;; # yellow - needs input
     idle) icon=$'\033[32m●\033[0m idle   ' rank=1 ;;    # green  - done, your turn
