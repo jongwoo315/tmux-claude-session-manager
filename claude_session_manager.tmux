@@ -14,6 +14,7 @@ new_key="$(get_tmux_option @claude_new_key 'Y')"
 resume_key="$(get_tmux_option @claude_resume_key 'R')"
 fork_key="$(get_tmux_option @claude_fork_key 'F')"
 list_key="$(get_tmux_option @claude_list_key 'u')"
+last_key="$(get_tmux_option @claude_last_key 'b')"
 
 # Launch (or re-attach to) a Claude session for the current pane's directory.
 # #{pane_current_path} / #{window_id} are expanded by run-shell before the args
@@ -37,3 +38,12 @@ tmux bind-key "$fork_key" \
 # closes that popup first so the picker opens full-size on the outer client.
 tmux bind-key "$list_key" \
   run-shell "$CURRENT_DIR/scripts/list.sh '#{client_name}'"
+
+# Jump straight back to the last attached session (skip the picker).
+tmux bind-key "$last_key" \
+  run-shell "$CURRENT_DIR/scripts/last.sh"
+
+# Track the most recently attached Claude session for the jump-back key. Append
+# (-a) so a user's own client-attached hook is preserved.
+tmux set-hook -ga client-attached \
+  "run-shell \"$CURRENT_DIR/scripts/record-last.sh '#{client_session}'\""
