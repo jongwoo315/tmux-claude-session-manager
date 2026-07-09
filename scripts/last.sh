@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Jump straight back into the last Claude session you were attached to, skipping
-# the picker. Meant for the flow: detach a session (prefix+d), then this key to
-# resume it. Falls back to the picker when there's no valid last session.
+# Toggle the last Claude session, skipping the picker:
+#   - inside a session popup  -> close it (detach)
+#   - on the outer client     -> reopen the last attached session
+# One key both ways. Falls back to the picker when there's no valid last session.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=helpers.sh
@@ -11,9 +12,10 @@ prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
 w="$(get_tmux_option @claude_popup_width '90%')"
 h="$(get_tmux_option @claude_popup_height '90%')"
 
-# Don't nest a popup inside a session — detach first, then jump.
+# Already inside a session popup -> close it. The client-attached hook already
+# recorded this session, so the next press reopens it.
 if [[ "$(tmux display-message -p '#S')" == "$prefix"* ]]; then
-  tmux display-message '🫪 Detach first (prefix+d), then jump to last session'
+  tmux detach-client
   exit 0
 fi
 
