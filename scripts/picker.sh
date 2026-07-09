@@ -18,8 +18,14 @@ emit_rows() {
     state=$(tmux show-options -qv -t "$s" @claude_state 2>/dev/null)
     at=$(tmux show-options -qv -t "$s" @claude_state_at 2>/dev/null)
     path=$(tmux display-message -p -t "$s" '#{pane_current_path}' 2>/dev/null)
-    # Human label; falls back to the dir basename so same-dir sessions differ.
-    title=$(tmux show-options -qv -t "$s" @claude_title 2>/dev/null)
+    # Human label: prefer the name Claude sets via /rename (or --name), which it
+    # emits as the terminal title — tmux exposes it as pane_title, prefixed with a
+    # status glyph ("✳ name"). Strip exactly one leading char + spaces in a UTF-8
+    # locale so the glyph goes but non-ASCII names survive. Falls back to a legacy
+    # @claude_title, then the dir basename.
+    title=$(tmux display-message -p -t "$s" '#{pane_title}' 2>/dev/null |
+      LC_ALL=en_US.UTF-8 sed -E 's/^.[[:space:]]+//')
+    [ -z "$title" ] && title=$(tmux show-options -qv -t "$s" @claude_title 2>/dev/null)
     [ -z "$title" ] && title="${path##*/}"
     case "$state" in
     waiting) icon=$'\033[33m●\033[0m waiting' rank=0 ;; # yellow - needs input
@@ -56,12 +62,11 @@ printf '\033[5 q' >/dev/tty 2>/dev/null || true
 trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
-  --reverse --cycle --header='Claude sessions · enter: jump · ctrl-r: rename · ctrl-x: kill' \
+  --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
   --preview="tmux capture-pane -ept {2} | tail -n \$FZF_PREVIEW_LINES" --preview-window='right,62%,nowrap' \
 	--bind="start:reload($self --list)" \
 	--bind="load:reload-sync(sleep 2; $self --list)" \
-  --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
-  --bind="ctrl-r:execute($DIR/rename.sh {2})+reload($self --list)")
+  --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)")
 
 [ -z "$sel" ] && exit 0
 target=$(printf '%s' "$sel" | LC_ALL=C cut -f2)
