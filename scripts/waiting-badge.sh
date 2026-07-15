@@ -6,5 +6,5 @@ set -uo pipefail
 n=$(tmux list-sessions -F '#{session_name} #{@claude_state}' 2>/dev/null \
       | awk '$2 == "waiting"' | wc -l | tr -d ' ')
 
-[ "${n:-0}" -gt 0 ] && printf '#[bg=yellow,fg=black,bold] ⏳ %s waiting #[default]' "$n"
+[ "${n:-0}" -gt 0 ] && printf '#[fg=yellow,bold]⏳ %s waiting #[default]' "$n"
 exit 0
