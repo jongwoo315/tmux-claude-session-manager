@@ -20,24 +20,24 @@ last_key="$(get_tmux_option @claude_last_key 'b')"
 # #{pane_current_path} / #{window_id} are expanded by run-shell before the args
 # reach the script.
 tmux bind-key "$launch_key" \
-  run-shell "$CURRENT_DIR/scripts/launch.sh '#{pane_current_path}' '#{window_id}'"
+  run-shell "$CURRENT_DIR/scripts/launch.sh '#{q:pane_current_path}' '#{q:window_id}'"
 
 # Launch a NEW session for the current pane's directory (multi-session per dir).
 tmux bind-key "$new_key" \
-  run-shell "$CURRENT_DIR/scripts/launch-new.sh '#{pane_current_path}' '#{window_id}'"
+  run-shell "$CURRENT_DIR/scripts/launch-new.sh '#{q:pane_current_path}' '#{q:window_id}'"
 
 # Launch a NEW picker-tracked session that resumes a past Claude conversation.
 tmux bind-key "$resume_key" \
-  run-shell "$CURRENT_DIR/scripts/resume-new.sh '#{pane_current_path}' '#{window_id}'"
+  run-shell "$CURRENT_DIR/scripts/resume-new.sh '#{q:pane_current_path}' '#{q:window_id}'"
 
 # Fork a past Claude conversation into a NEW picker-tracked session (fresh ID).
 tmux bind-key "$fork_key" \
-  run-shell "$CURRENT_DIR/scripts/fork-new.sh '#{pane_current_path}' '#{window_id}'"
+  run-shell "$CURRENT_DIR/scripts/fork-new.sh '#{q:pane_current_path}' '#{q:window_id}'"
 
 # Open the session picker. When pressed from inside a session popup, list.sh
 # closes that popup first so the picker opens full-size on the outer client.
 tmux bind-key "$list_key" \
-  run-shell "$CURRENT_DIR/scripts/list.sh '#{client_name}'"
+  run-shell "$CURRENT_DIR/scripts/list.sh '#{q:client_name}'"
 
 # Jump straight back to the last attached session (skip the picker).
 tmux bind-key "$last_key" \
@@ -46,4 +46,4 @@ tmux bind-key "$last_key" \
 # Track the most recently attached Claude session for the jump-back key. Append
 # (-a) so a user's own client-attached hook is preserved.
 tmux set-hook -ga client-attached \
-  "run-shell \"$CURRENT_DIR/scripts/record-last.sh '#{client_session}'\""
+  "run-shell \"$CURRENT_DIR/scripts/record-last.sh '#{q:client_session}'\""
