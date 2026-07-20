@@ -9,6 +9,12 @@
 session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null) || exit 0
 [ -z "$session" ] && exit 0
 
-tmux set-option -t "$session" @claude_state "${1:-idle}"
-tmux set-option -t "$session" @claude_state_at "$(date +%s)"
+new="${1:-idle}"
+# Stamp @claude_state_at only on a real state TRANSITION. Otherwise a working
+# session's clock resets every tool completion (PostToolUse=working re-asserts the
+# same state), so the picker age never counts up. Same-state re-assert keeps the
+# original timestamp → age reflects time since the state actually began.
+cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
+tmux set-option -t "$session" @claude_state "$new"
+[ "$new" != "$cur" ] && tmux set-option -t "$session" @claude_state_at "$(date +%s)"
 exit 0
