@@ -108,3 +108,24 @@ git push --force-with-lease origin main
 
 - 신규 파일(`*-new.sh`, `rename.sh`)은 additive → 충돌 없음.
 - `picker.sh` / `launch.sh` / `.tmux` 편집만 충돌 가능 → 최소·국소 유지.
+
+> ⚠️ **blind `git rebase upstream/main` 금지.** 아래 `afa093b`가 딸려와 `state.sh`를
+> 삭제 → waiting-badge + 상태 훅 전부 깨짐. 안전 커밋만 **cherry-pick** 하거나,
+> rebase 중 `afa093b`를 반드시 drop 할 것.
+
+### Upstream 커밋 검토 기록 (2026-07-20 기준, `54403a3`)
+
+이 시점 fork는 upstream보다 9 commits behind. 각 upstream 커밋 판정:
+
+| 커밋 | 내용 | 판정 |
+| --- | --- | --- |
+| `afa093b` | 상태를 `claude agents --json`로 전환, **`state.sh` 삭제** | ❌ **절대 병합 금지** — badge/훅 전멸 |
+| `6e65e9c` | 키바인드 `#{q:}` shell-quote (커맨드 인젝션) | ✅ **반영 완료** (`54403a3`, fork 신규 바인드까지 확대) |
+| `5a0821a` | README url 수정 | ✅ 무해 (원하면 반영) |
+| `45d593f` | picker 팝업을 invoking client로 scope | ⏭️ 스킵 — fork가 이미 해결(`4620415`,`16e3751`) |
+| `da665cd` | 오버레이 파괴 후 picker 재오픈 | ⏭️ 스킵 — fork popup 처리와 중복/충돌 |
+| `6b4e73b` | preview를 list 위로 stack | ⏭️ 스킵 — fork가 이미 preview 잘림 해결(`ff97ced`) |
+| `59bc4fa` `a29d32d` | `@claude_fzf_options` / `CLAUDE_PICKER` export | 🟡 additive — 원하면 `picker.sh`에 수동 포팅 |
+
+**핵심:** upstream은 훅 기반 상태(`state.sh`)를 버리고 `claude agents --json`로 갈아탐.
+이 fork는 훅 기반을 유지하므로 상태 관련 커밋(`afa093b`)은 영구 divergence.
