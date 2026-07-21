@@ -18,6 +18,16 @@ json_str() {
     head -1 | sed -E "s/^\"$2\"[[:space:]]*:[[:space:]]*\"(.*)\"\$/\1/"
 }
 
+# Every claude pid in a pane's process subtree, one per line. A session that
+# /resume-s or forks spawns a NESTED claude with its own sessions/<pid>.json; tmux
+# pane_pid points at the OUTER claude, whose json name goes stale after an inner
+# /rename. Walking the subtree lets emit_rows pick the freshest json instead.
+collect_claude_pids() {
+  local root=$1 kid
+  [ "$(ps -o comm= -p "$root" 2>/dev/null | sed 's#.*/##')" = claude ] && printf '%s\n' "$root"
+  for kid in $(pgrep -P "$root" 2>/dev/null); do collect_claude_pids "$kid"; done
+}
+
 emit_rows() {
   local now s state at path icon rank ago title
   now=$(date +%s)
@@ -30,15 +40,21 @@ emit_rows() {
     # user set (via --name or /rename) has NO nameSource, while an auto-derived
     # name is tagged "nameSource":"derived". Show the name only when it's explicit;
     # for derived/unnamed sessions fall back to the launcher's @claude_title
-    # (dir#N) and finally the dir basename. pane_pid is Claude's pid because the
-    # popup runs claude as the pane's root process. (pane_title is avoided: for an
-    # unnamed session it holds Claude's auto-summary, not the dir label.)
+    # (dir#N) and finally the dir basename. Across the pane's claude subtree pick
+    # the freshest explicitly-named json (newest mtime) — that's the session the
+    # user is actually in, and the one an inner /rename touched. (pane_title is
+    # avoided: for an unnamed session it holds Claude's auto-summary, not a label.)
     pid=$(tmux display-message -p -t "$s" '#{pane_pid}' 2>/dev/null)
-    sfile="$HOME/.claude/sessions/${pid}.json"
-    title=""
-    if [ -r "$sfile" ] && [ "$(json_str "$sfile" nameSource)" != "derived" ]; then
-      title=$(json_str "$sfile" name)
-    fi
+    title=""; best_m=0
+    for cp in $(collect_claude_pids "$pid"); do
+      cf="$HOME/.claude/sessions/${cp}.json"
+      [ -r "$cf" ] || continue
+      [ "$(json_str "$cf" nameSource)" = "derived" ] && continue
+      cn=$(json_str "$cf" name)
+      [ -z "$cn" ] && continue
+      cm=$(stat -f %m "$cf" 2>/dev/null)
+      [ "${cm:-0}" -ge "$best_m" ] && { best_m="${cm:-0}"; title="$cn"; }
+    done
     if [ -z "$title" ]; then
       title=$(tmux show-options -qv -t "$s" @claude_title 2>/dev/null)
       [ -z "$title" ] && title="${path##*/}"
