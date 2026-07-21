@@ -125,7 +125,35 @@ git push --force-with-lease origin main
 | `45d593f` | picker 팝업을 invoking client로 scope | ⏭️ 스킵 — fork가 이미 해결(`4620415`,`16e3751`) |
 | `da665cd` | 오버레이 파괴 후 picker 재오픈 | ⏭️ 스킵 — fork popup 처리와 중복/충돌 |
 | `6b4e73b` | preview를 list 위로 stack | ⏭️ 스킵 — fork가 이미 preview 잘림 해결(`ff97ced`) |
-| `59bc4fa` `a29d32d` | `@claude_fzf_options` / `CLAUDE_PICKER` export | 🟡 additive — 원하면 `picker.sh`에 수동 포팅 |
+| `59bc4fa` `a29d32d` | `@claude_fzf_options` / `CLAUDE_PICKER` export | ✅ **반영 완료** (수동 포팅, 2026-07-21) |
+| `2c14b13` `7dc8877` | 머지 커밋 (`6e65e9c` 병합) | ⏭️ 스킵 — 내용 중복 |
 
 **핵심:** upstream은 훅 기반 상태(`state.sh`)를 버리고 `claude agents --json`로 갈아탐.
 이 fork는 훅 기반을 유지하므로 상태 관련 커밋(`afa093b`)은 영구 divergence.
+
+### `@claude_fzf_options` 사용 시 fork 주의사항
+
+upstream README 예제를 **그대로 쓰면 안 됨**. fork는 행 레이아웃이 다름:
+
+| | upstream | fork |
+| --- | --- | --- |
+| kill | `kill {3}` (PID) | `tmux kill-session -t {2}` (세션명) |
+| `--with-nth` | `5,6,7,8` | `3,4,5,6` |
+
+fork용 vim 바인딩 예시 (`~/.tmux.conf`):
+
+```sh
+set -g @claude_fzf_options "\
+  --prompt 'nav> ' \
+  --bind 'j:down' \
+  --bind 'k:up' \
+  --bind 'q:abort' \
+  --bind 'x:execute-silent(tmux kill-session -t {2})+reload(\$CLAUDE_PICKER --list)' \
+  --bind 'i:unbind(j,k,q,i,a,x)+change-prompt(filter> )' \
+  --bind 'a:unbind(j,k,q,i,a,x)+change-prompt(filter> )' \
+  --bind 'esc:rebind(j,k,q,i,a,x)+change-prompt(nav> )'"
+```
+
+⚠️ 사용자 옵션은 **마지막에 붙어 기본값을 override** 함. fork의 자동 새로고침
+(`--bind start:reload`, `--bind load:reload-sync`)을 같은 이벤트로 재바인드하면
+picker 목록이 갱신되지 않음. `start` / `load` 는 건드리지 말 것.

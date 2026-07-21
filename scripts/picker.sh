@@ -102,6 +102,14 @@ fi
 self="${BASH_SOURCE[0]}"
 export FZF_DEFAULT_OPTS=''
 
+# Arbitrary user fzf options (custom --bind, --preview-window, ...). Appended
+# last so they can override the defaults below. CLAUDE_PICKER lets a user bind
+# reload the row list the way the built-in ctrl-x does.
+export CLAUDE_PICKER="$self"
+extra_opts=()
+fzf_options="$(get_tmux_option @claude_fzf_options '')"
+[ -n "$fzf_options" ] && eval "extra_opts=($fzf_options)"
+
 # The popup inherits a steady-block cursor. fzf parks the real terminal cursor
 # on its query line, so switch to a blinking bar (DECSCUSR 5) for the input and
 # restore the default (0) on any exit path.
@@ -113,7 +121,8 @@ sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --preview="tmux capture-pane -ept {2}" --preview-window='up,70%,follow' \
 	--bind="start:reload($self --list)" \
 	--bind="load:reload-sync(sleep 2; $self --list)" \
-  --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)")
+  --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
+  ${extra_opts[@]+"${extra_opts[@]}"})
 
 [ -z "$sel" ] && exit 0
 target=$(printf '%s' "$sel" | LC_ALL=C cut -f2)
