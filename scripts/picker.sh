@@ -22,15 +22,30 @@ json_str() {
 # /resume-s or forks spawns a NESTED claude with its own sessions/<pid>.json; tmux
 # pane_pid points at the OUTER claude, whose json name goes stale after an inner
 # /rename. Walking the subtree lets emit_rows pick the freshest json instead.
+#
+# Resolved from the single $ps_snap snapshot (ps output), NOT by forking ps/pgrep
+# per node — a recursive walk over each session's dozens of MCP/node children,
+# every 2s reload, made the picker crawl. One awk BFS over the snapshot instead.
 collect_claude_pids() {
-  local root=$1 kid
-  [ "$(ps -o comm= -p "$root" 2>/dev/null | sed 's#.*/##')" = claude ] && printf '%s\n' "$root"
-  for kid in $(pgrep -P "$root" 2>/dev/null); do collect_claude_pids "$kid"; done
+  awk -v root="$1" '
+    { c=$3; sub(/.*\//, "", c); comm[$1]=c; kids[$2]=kids[$2] " " $1 }
+    END {
+      q[++n]=root
+      for (i=1; i<=n; i++) {
+        p=q[i]
+        if (comm[p]=="claude") print p
+        m=split(kids[p], a, " ")
+        for (j=1; j<=m; j++) if (a[j] != "") q[++n]=a[j]
+      }
+    }
+  ' <<<"$ps_snap"
 }
 
 emit_rows() {
-  local now s state at path icon rank ago title
+  local now s state at path icon rank ago title ps_snap
   now=$(date +%s)
+  # One process snapshot for the whole render; collect_claude_pids reads it.
+  ps_snap=$(ps -axo pid=,ppid=,comm=)
   tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${prefix}" | while IFS= read -r s; do
     state=$(tmux show-options -qv -t "$s" @claude_state 2>/dev/null)
     at=$(tmux show-options -qv -t "$s" @claude_state_at 2>/dev/null)
