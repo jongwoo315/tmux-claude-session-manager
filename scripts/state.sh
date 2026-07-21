@@ -4,6 +4,21 @@
 #
 # Claude Code hooks inherit the Claude process environment, so $TMUX_PANE is set
 # whenever Claude runs inside tmux. Outside tmux this is a no-op.
+#
+# EXCEPT a forked/resumed session runs under a daemon on a background pty
+# (`claude --fork-session --bg-pty-host`, parented by `claude daemon run`), whose
+# env carries NO TMUX_PANE — so the hook can't find its tmux session and the
+# picker state freezes at whatever the outer claude last set. Climb the parent
+# pids for an ancestor that DOES have TMUX_PANE (the outer claude still owns the
+# pane), and use that. Bounded to a few hops; only runs when TMUX_PANE is unset.
+if [ -z "$TMUX_PANE" ]; then
+  p=$PPID
+  while [ "${p:-0}" -gt 1 ]; do
+    tp=$(ps eww -p "$p" 2>/dev/null | tr ' ' '\n' | grep -m1 '^TMUX_PANE=')
+    [ -n "$tp" ] && { TMUX_PANE="${tp#TMUX_PANE=}"; break; }
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  done
+fi
 [ -z "$TMUX_PANE" ] && exit 0
 
 session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null) || exit 0
