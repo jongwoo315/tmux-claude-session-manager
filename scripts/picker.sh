@@ -110,7 +110,7 @@ trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
-  --preview="tmux capture-pane -ept {2} | tail -n \$FZF_PREVIEW_LINES" --preview-window='right,62%,nowrap' \
+  --preview="tmux capture-pane -ept {2} | tail -n \$FZF_PREVIEW_LINES" --preview-window='right,62%,wrap' \
 	--bind="start:reload($self --list)" \
 	--bind="load:reload-sync(sleep 2; $self --list)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)")
