@@ -26,19 +26,13 @@ session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
 
 new="${1:-idle}"
 
-# The Stop hook fires idle when the foreground turn ends — but a session with a
-# live background agent is still working, not idle. Downgrading to idle makes the
-# picker show idle for the whole (minutes-long) agent run. Stop passes the payload
-# on stdin with background_tasks[]; if any is running, stay working. Only read
-# stdin when it's piped (a hook) — a manual `state.sh idle` on a TTY must not block
-# on cat. [ -t 0 ] is true for a terminal, false for a pipe.
-if [ "$new" = "idle" ] && [ ! -t 0 ]; then
-  raw=$(cat 2>/dev/null)
-  running=$(printf '%s' "$raw" \
-    | jq -r '[.background_tasks[]? | select(.status=="running")] | length' 2>/dev/null)
-  [ "${running:-0}" -gt 0 ] && new="working"
-fi
-
+# Picker state tracks the FOREGROUND turn (working/waiting/idle), not background
+# agents. An earlier version kept a session "working" whenever a background agent
+# was still running (read from the Stop payload's background_tasks[]). That was
+# wrong: a session sitting at the prompt with lingering background agents is idle
+# — the user's turn — and forcing working froze it red after the answer landed.
+# The "working session shows idle" bug it chased was really the daemon TMUX_PANE
+# no-op above; the climb fixes that at the source.
 cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
 
 # Don't let a Stop-fired idle clobber waiting. AskUserQuestion/ExitPlanMode set
