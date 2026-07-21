@@ -26,13 +26,18 @@ session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
 
 new="${1:-idle}"
 
-# Picker state tracks the FOREGROUND turn (working/waiting/idle), not background
-# agents. An earlier version kept a session "working" whenever a background agent
-# was still running (read from the Stop payload's background_tasks[]). That was
-# wrong: a session sitting at the prompt with lingering background agents is idle
-# — the user's turn — and forcing working froze it red after the answer landed.
-# The "working session shows idle" bug it chased was really the daemon TMUX_PANE
-# no-op above; the climb fixes that at the source.
+# Picker state tracks the FOREGROUND turn only. A background agent's tool events
+# fire this same hook on the PARENT session (identical session_id and TMUX_PANE),
+# so a session sitting idle at the prompt with lingering agents would get stamped
+# working on every agent tool completion — frozen red after the answer landed.
+# Subagent events carry a non-null "agent_id"; foreground events have it null or
+# absent. Ignore the subagent ones. Only read stdin when piped (a hook) so a
+# manual `state.sh idle` on a TTY doesn't block on cat ([ -t 0 ] true = terminal).
+if [ ! -t 0 ]; then
+  raw=$(cat 2>/dev/null)
+  case "$raw" in *'"agent_id":"'*) exit 0 ;; esac
+fi
+
 cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
 
 # Don't let a Stop-fired idle clobber waiting. AskUserQuestion/ExitPlanMode set
