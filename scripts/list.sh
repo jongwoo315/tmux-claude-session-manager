@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$DIR/helpers.sh"
 
 prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
-w="$(get_tmux_option @claude_popup_width '90%')"
+w="$(get_tmux_option @claude_popup_width '100%')"
 h="$(get_tmux_option @claude_popup_height '90%')"
 
 # The client the key binding was pressed on (passed as '#{client_name}').
