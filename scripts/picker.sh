@@ -51,24 +51,25 @@ emit_rows() {
   sessions=$(tmux list-sessions -F "$fmt" 2>/dev/null | grep "^${prefix}")
   [ -z "$sessions" ] && return
 
-  # pane-root pid -> its claude-subtree pids, resolved in one awk pass and stashed
-  # in a bash map so the row loop does zero per-row process walking.
+  # pane-root pid -> its claude-subtree pids, all roots resolved in ONE awk pass.
+  # $subtrees holds "<root> <pid>..." lines; the row loop looks a root up with a
+  # pure-bash while (no fork, no `declare -A` — macOS still ships bash 3.2, which
+  # has no associative arrays).
   roots=$(printf '%s\n' "$sessions" | cut -d$'\037' -f4 | tr '\n' ' ')
   subtrees=$(claude_subtrees "$roots" "$ps_snap")
-  declare -A SUB
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    root=${line%% *}; SUB[$root]=${line#* }
-  done <<<"$subtrees"
 
   printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path; do
+    pids=""
+    while IFS= read -r line; do
+      [ "${line%% *}" = "$pid" ] && { pids=${line#* }; break; }
+    done <<<"$subtrees"
     # Freshest explicitly-named sessions/<pid>.json across this pane's claude
     # subtree. A user-set name (--name or /rename) has NO nameSource; an auto-
     # derived one is tagged "nameSource":"derived". Prefer explicit names; else the
     # launcher's @claude_title (dir#N); else the dir basename. (pane_title avoided
     # — for an unnamed session it holds Claude's auto-summary, not a label.)
     title=""; best_m=0
-    for cp in ${SUB[$pid]}; do
+    for cp in $pids; do
       cf="$HOME/.claude/sessions/${cp}.json"
       [ -r "$cf" ] || continue
       # One grep pulls BOTH "name" and "nameSource"; first occurrence of each wins.
