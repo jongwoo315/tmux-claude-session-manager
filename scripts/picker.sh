@@ -11,86 +11,93 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
 
-# Extract a top-level JSON string field from a small file (no jq dependency).
-#   json_str <file> <key>  ->  the string value, or empty.
-json_str() {
-  LC_ALL=C /usr/bin/grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null |
-    head -1 | sed -E "s/^\"$2\"[[:space:]]*:[[:space:]]*\"(.*)\"\$/\1/"
-}
-
-# Every claude pid in a pane's process subtree, one per line. A session that
-# /resume-s or forks spawns a NESTED claude with its own sessions/<pid>.json; tmux
-# pane_pid points at the OUTER claude, whose json name goes stale after an inner
-# /rename. Walking the subtree lets emit_rows pick the freshest json instead.
-#
-# Resolved from the single $ps_snap snapshot (ps output), NOT by forking ps/pgrep
-# per node — a recursive walk over each session's dozens of MCP/node children,
-# every 2s reload, made the picker crawl. One awk BFS over the snapshot instead.
-collect_claude_pids() {
-  awk -v root="$1" '
+# Build, in ONE awk pass over a ps snapshot ($2), each pane root's claude-subtree
+# pids: emits "<root> <claudePid>..." per root ($1 = space-separated roots). A
+# /resume or fork spawns a NESTED claude with its own sessions/<pid>.json; tmux's
+# pane_pid points at the OUTER claude, so we walk the subtree and later pick the
+# freshest json. One awk for ALL rows (not per-row) — a per-row walk over each
+# session's dozens of MCP/node children, every 2s reload, made the picker crawl.
+claude_subtrees() {
+  awk -v roots="$1" '
     { c=$3; sub(/.*\//, "", c); comm[$1]=c; kids[$2]=kids[$2] " " $1 }
     END {
-      q[++n]=root
-      for (i=1; i<=n; i++) {
-        p=q[i]
-        if (comm[p]=="claude") print p
-        m=split(kids[p], a, " ")
-        for (j=1; j<=m; j++) if (a[j] != "") q[++n]=a[j]
+      nr=split(roots, R, " ")
+      for (r=1; r<=nr; r++) {
+        root=R[r]; if (root=="") continue
+        delete q; n=0; q[++n]=root; line=root
+        for (i=1; i<=n; i++) {
+          p=q[i]
+          if (comm[p]=="claude") line=line " " p
+          m=split(kids[p], a, " ")
+          for (j=1; j<=m; j++) if (a[j] != "") q[++n]=a[j]
+        }
+        print line
       }
-    }
-  ' <<<"$ps_snap"
+    }' <<<"$2"
 }
 
 emit_rows() {
-  local now s state at path icon rank ago title ps_snap
+  local now ps_snap fmt sessions roots subtrees line root
   now=$(date +%s)
-  # One process snapshot for the whole render; collect_claude_pids reads it.
   ps_snap=$(ps -axo pid=,ppid=,comm=)
-  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${prefix}" | while IFS= read -r s; do
-    state=$(tmux show-options -qv -t "$s" @claude_state 2>/dev/null)
-    at=$(tmux show-options -qv -t "$s" @claude_state_at 2>/dev/null)
-    # One display-message for both fields (pid first — numeric, no spaces; path is
-    # the rest, so a path with spaces stays intact). Halves the per-row tmux forks.
-    read -r pid path < <(tmux display-message -p -t "$s" '#{pane_pid} #{pane_current_path}' 2>/dev/null)
-    # Human label. Claude records each running session in
-    # ~/.claude/sessions/<pid>.json with a "name" and a "nameSource": a name the
-    # user set (via --name or /rename) has NO nameSource, while an auto-derived
-    # name is tagged "nameSource":"derived". Show the name only when it's explicit;
-    # for derived/unnamed sessions fall back to the launcher's @claude_title
-    # (dir#N) and finally the dir basename. Across the pane's claude subtree pick
-    # the freshest explicitly-named json (newest mtime) — that's the session the
-    # user is actually in, and the one an inner /rename touched. (pane_title is
-    # avoided: for an unnamed session it holds Claude's auto-summary, not a label.)
+
+  # ONE tmux call for every field of every claude session (name, state, at, pane
+  # pid, @claude_title, path) — replaces the per-row show-options x2 +
+  # display-message (~4 forks/row) with a single list-sessions. Delimiter is \037
+  # (unit separator), NOT tab: tab is a whitespace IFS char, so an empty middle
+  # field (e.g. orch sessions have no @claude_title) would collapse and shift the
+  # remaining columns. \037 never appears in a name or path.
+  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}')
+  sessions=$(tmux list-sessions -F "$fmt" 2>/dev/null | grep "^${prefix}")
+  [ -z "$sessions" ] && return
+
+  # pane-root pid -> its claude-subtree pids, resolved in one awk pass and stashed
+  # in a bash map so the row loop does zero per-row process walking.
+  roots=$(printf '%s\n' "$sessions" | cut -d$'\037' -f4 | tr '\n' ' ')
+  subtrees=$(claude_subtrees "$roots" "$ps_snap")
+  declare -A SUB
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    root=${line%% *}; SUB[$root]=${line#* }
+  done <<<"$subtrees"
+
+  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path; do
+    # Freshest explicitly-named sessions/<pid>.json across this pane's claude
+    # subtree. A user-set name (--name or /rename) has NO nameSource; an auto-
+    # derived one is tagged "nameSource":"derived". Prefer explicit names; else the
+    # launcher's @claude_title (dir#N); else the dir basename. (pane_title avoided
+    # — for an unnamed session it holds Claude's auto-summary, not a label.)
     title=""; best_m=0
-    for cp in $(collect_claude_pids "$pid"); do
+    for cp in ${SUB[$pid]}; do
       cf="$HOME/.claude/sessions/${cp}.json"
       [ -r "$cf" ] || continue
-      [ "$(json_str "$cf" nameSource)" = "derived" ] && continue
-      cn=$(json_str "$cf" name)
+      # One grep pulls BOTH "name" and "nameSource"; first occurrence of each wins.
+      src=""; cn=""
+      while IFS= read -r kv; do
+        case "$kv" in
+          '"nameSource"'*) [ -z "$src" ] && { src=${kv#*:}; src=${src//\"/}; src=${src# }; } ;;
+          '"name"'*)       [ -z "$cn"  ] && { cn=${kv#*:};  cn=${cn//\"/};  cn=${cn# }; } ;;
+        esac
+      done < <(LC_ALL=C /usr/bin/grep -oE '"name(Source)?"[[:space:]]*:[[:space:]]*"[^"]*"' "$cf" 2>/dev/null)
+      [ "$src" = "derived" ] && continue
       [ -z "$cn" ] && continue
       cm=$(stat -f %m "$cf" 2>/dev/null)
       [ "${cm:-0}" -ge "$best_m" ] && { best_m="${cm:-0}"; title="$cn"; }
     done
-    if [ -z "$title" ]; then
-      title=$(tmux show-options -qv -t "$s" @claude_title 2>/dev/null)
-      [ -z "$title" ] && title="${path##*/}"
-    fi
+    [ -z "$title" ] && title="$ctitle"
+    [ -z "$title" ] && title="${path##*/}"
+
     case "$state" in
     waiting) icon=$'\033[33m●\033[0m waiting' rank=0 ;; # yellow - needs input
-    idle) icon=$'\033[32m●\033[0m idle   ' rank=1 ;;    # green  - done, your turn
+    idle)    icon=$'\033[32m●\033[0m idle   ' rank=1 ;; # green  - done, your turn
     working) icon=$'\033[31m●\033[0m working' rank=3 ;; # red    - busy, leave it
-    *) icon=$'\033[90m●\033[0m   ?    ' rank=2 ;;       # grey   - unknown (no hook yet)
+    *)       icon=$'\033[90m●\033[0m   ?    ' rank=2 ;; # grey   - unknown (no hook yet)
     esac
     if [ -n "$at" ]; then ago="$(((now - at) / 60))m"; else ago='-'; fi
-    # rank \t session \t icon \t age \t title \t path (rank/session hidden via --with-nth)
-    # Title is space-padded, not tab-separated: fzf expands tabs to --tabstop
-    # (8), so an unpadded name pushes the path column in 8-col jumps. Pad wide
-    # enough for the longest name (e.g. "5055 change db cred rotation lambda
-    # logic") and the path column stays put.
+    # rank \t session \t icon \t age \t title(padded) \t path. Title is space-
+    # padded (not tab) so fzf's 8-col tabstop doesn't jump the path column; 44 fits
+    # the longest name. rank asc, then age asc (just-finished floats to group top).
     printf '%s\t%s\t%s\t%5s\t%-44s\t%s\n' "$rank" "$s" "$icon" "$ago" "$title" "${path/#$HOME/~}"
-    # rank asc (attention-needed floats up), then age asc so the session that
-    # finished just now sits at the top of its group. -k4,4n reads the leading
-    # number of the age field ("5m" -> 5; "-" -> 0).
   done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n
 }
 
