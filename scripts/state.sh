@@ -35,10 +35,24 @@ new="${1:-idle}"
 # manual `state.sh idle` on a TTY doesn't block on cat ([ -t 0 ] true = terminal).
 if [ ! -t 0 ]; then
   raw=$(cat 2>/dev/null)
-  case "$raw" in *'"agent_id":"'*) exit 0 ;; esac
+  # EXCEPT SubagentStop: a finished background agent re-invokes the PARENT loop
+  # (it synthesizes the result with no prompt and often no tool call), so no
+  # working-stamping hook would otherwise fire — the picker sat on the Stop-set
+  # idle while the session was visibly working. SubagentStop IS the re-invoke
+  # signal; let it through (as `working`) despite its agent_id.
+  subagent_stop=false
+  case "$raw" in *'"hook_event_name":"SubagentStop"'*) subagent_stop=true ;; esac
+  if [ "$subagent_stop" = false ]; then
+    case "$raw" in *'"agent_id":"'*) exit 0 ;; esac
+  fi
 fi
 
 cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
+
+# SubagentStop must not clobber waiting: if the parent is blocked on
+# AskUserQuestion/permission, an agent finishing doesn't unblock it — the box is
+# still up. (UserPromptSubmit/PostToolUse working legitimately clear waiting.)
+[ "${subagent_stop:-false}" = true ] && [ "$cur" = "waiting" ] && exit 0
 
 # Don't let a Stop-fired idle clobber waiting. AskUserQuestion/ExitPlanMode set
 # waiting via PreToolUse; a session blocked on user input is NOT idle. Only the
