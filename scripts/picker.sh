@@ -49,7 +49,9 @@ emit_rows() {
   tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${prefix}" | while IFS= read -r s; do
     state=$(tmux show-options -qv -t "$s" @claude_state 2>/dev/null)
     at=$(tmux show-options -qv -t "$s" @claude_state_at 2>/dev/null)
-    path=$(tmux display-message -p -t "$s" '#{pane_current_path}' 2>/dev/null)
+    # One display-message for both fields (pid first — numeric, no spaces; path is
+    # the rest, so a path with spaces stays intact). Halves the per-row tmux forks.
+    read -r pid path < <(tmux display-message -p -t "$s" '#{pane_pid} #{pane_current_path}' 2>/dev/null)
     # Human label. Claude records each running session in
     # ~/.claude/sessions/<pid>.json with a "name" and a "nameSource": a name the
     # user set (via --name or /rename) has NO nameSource, while an auto-derived
@@ -59,7 +61,6 @@ emit_rows() {
     # the freshest explicitly-named json (newest mtime) — that's the session the
     # user is actually in, and the one an inner /rename touched. (pane_title is
     # avoided: for an unnamed session it holds Claude's auto-summary, not a label.)
-    pid=$(tmux display-message -p -t "$s" '#{pane_pid}' 2>/dev/null)
     title=""; best_m=0
     for cp in $(collect_claude_pids "$pid"); do
       cf="$HOME/.claude/sessions/${cp}.json"
@@ -123,7 +124,6 @@ trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
   --preview="tmux capture-pane -ept {2}" --preview-window='up,70%,follow' \
-	--bind="start:reload($self --list)" \
 	--bind="load:reload-sync(sleep 2; $self --list)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
   ${extra_opts[@]+"${extra_opts[@]}"})
