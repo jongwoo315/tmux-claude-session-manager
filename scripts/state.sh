@@ -33,18 +33,34 @@ new="${1:-idle}"
 # Subagent events carry a non-null "agent_id"; foreground events have it null or
 # absent. Ignore the subagent ones. Only read stdin when piped (a hook) so a
 # manual `state.sh idle` on a TTY doesn't block on cat ([ -t 0 ] true = terminal).
+subagent_stop=false
+skip_stamp=false
 if [ ! -t 0 ]; then
   raw=$(cat 2>/dev/null)
+  # Event trace, enabled by `touch ~/.claude/state-debug` — for diagnosing missed
+  # or misordered hook events (a state stuck against the picker's expectation).
+  if [ -e "$HOME/.claude/state-debug" ]; then
+    ev=$(printf '%s' "$raw" | /usr/bin/grep -oE '"hook_event_name":"[^"]*"' | head -1)
+    printf '%s %s %s %s\n' "$(date +%H:%M:%S)" "$session" "$new" "${ev:-no-event}" >> "$HOME/.claude/state-debug.log"
+  fi
   # EXCEPT SubagentStop: a finished background agent re-invokes the PARENT loop
   # (it synthesizes the result with no prompt and often no tool call), so no
   # working-stamping hook would otherwise fire — the picker sat on the Stop-set
   # idle while the session was visibly working. SubagentStop IS the re-invoke
   # signal; let it through (as `working`) despite its agent_id.
-  subagent_stop=false
   case "$raw" in *'"hook_event_name":"SubagentStop"'*) subagent_stop=true ;; esac
   if [ "$subagent_stop" = false ]; then
     case "$raw" in *'"agent_id":"'*) exit 0 ;; esac
   fi
+  # A session with live agents BOUNCES idle<->working every agent-notification
+  # cycle (Stop -> idle, SubagentStop -> working). Each bounce is a transition, so
+  # stamping it pinned the picker age at 0m through an hours-long working stretch.
+  # Treat the agent episode as ONE clock: skip the restamp on the transient hops —
+  # Stop while agents still run, and the SubagentStop re-entry. The stamp then
+  # survives from the episode's UserPromptSubmit until a real idle (Stop with no
+  # running agents) or the user's next prompt.
+  [ "$subagent_stop" = true ] && skip_stamp=true
+  case "$new:$raw" in idle:*'"status":"running"'*) skip_stamp=true ;; esac
 fi
 
 cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
@@ -52,7 +68,7 @@ cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
 # SubagentStop must not clobber waiting: if the parent is blocked on
 # AskUserQuestion/permission, an agent finishing doesn't unblock it — the box is
 # still up. (UserPromptSubmit/PostToolUse working legitimately clear waiting.)
-[ "${subagent_stop:-false}" = true ] && [ "$cur" = "waiting" ] && exit 0
+[ "$subagent_stop" = true ] && [ "$cur" = "waiting" ] && exit 0
 
 # Don't let a Stop-fired idle clobber waiting. AskUserQuestion/ExitPlanMode set
 # waiting via PreToolUse; a session blocked on user input is NOT idle. Only the
@@ -66,5 +82,6 @@ cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
 # same state), so the picker age never counts up. Same-state re-assert keeps the
 # original timestamp → age reflects time since the state actually began.
 tmux set-option -t "$session" @claude_state "$new"
-[ "$new" != "$cur" ] && tmux set-option -t "$session" @claude_state_at "$(date +%s)"
+[ "$new" != "$cur" ] && [ "$skip_stamp" = false ] &&
+  tmux set-option -t "$session" @claude_state_at "$(date +%s)"
 exit 0
