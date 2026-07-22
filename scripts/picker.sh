@@ -84,8 +84,9 @@ emit_rows() {
     # rank \t session \t icon \t age \t title \t path (rank/session hidden via --with-nth)
     # Title is space-padded, not tab-separated: fzf expands tabs to --tabstop
     # (8), so an unpadded name pushes the path column in 8-col jumps. Pad wide
-    # enough for a long name (study-<repo>) and the path column stays put.
-    printf '%s\t%s\t%s\t%5s\t%-36s\t%s\n' "$rank" "$s" "$icon" "$ago" "$title" "${path/#$HOME/~}"
+    # enough for the longest name (e.g. "5055 change db cred rotation lambda
+    # logic") and the path column stays put.
+    printf '%s\t%s\t%s\t%5s\t%-44s\t%s\n' "$rank" "$s" "$icon" "$ago" "$title" "${path/#$HOME/~}"
     # rank asc (attention-needed floats up), then age asc so the session that
     # finished just now sits at the top of its group. -k4,4n reads the leading
     # number of the age field ("5m" -> 5; "-" -> 0).
