@@ -60,7 +60,16 @@ if [ ! -t 0 ]; then
   # survives from the episode's UserPromptSubmit until a real idle (Stop with no
   # running agents) or the user's next prompt.
   [ "$subagent_stop" = true ] && skip_stamp=true
-  case "$new:$raw" in idle:*'"status":"running"'*) skip_stamp=true ;; esac
+  # A Stop fired while background agents are STILL RUNNING is not a real idle. The
+  # foreground turn ended, but the session is visibly working ("Waiting for N
+  # background agents to finish") and its agents keep producing tool events — which
+  # the agent_id gate above correctly discards, so nothing would re-assert working.
+  # Recording idle here also made orch read the debounced idle as step-complete and
+  # close the task while the session was still working (observed: DEV-7133 marked
+  # done mid-PR-review). Keep the current state instead: when the agents finish they
+  # re-invoke the parent (UserPromptSubmit -> working), and THAT turn's Stop — with
+  # no running entry in background_tasks — lands the real idle.
+  case "$new:$raw" in idle:*'"status":"running"'*) exit 0 ;; esac
 fi
 
 cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
