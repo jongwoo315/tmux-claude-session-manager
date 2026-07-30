@@ -47,7 +47,7 @@ emit_rows() {
   # (unit separator), NOT tab: tab is a whitespace IFS char, so an empty middle
   # field (e.g. orch sessions have no @claude_title) would collapse and shift the
   # remaining columns. \037 never appears in a name or path.
-  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}')
+  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}')
   sessions=$(tmux list-sessions -F "$fmt" 2>/dev/null | grep "^${prefix}")
   [ -z "$sessions" ] && return
 
@@ -58,7 +58,18 @@ emit_rows() {
   roots=$(printf '%s\n' "$sessions" | cut -d$'\037' -f4 | tr '\n' ' ')
   subtrees=$(claude_subtrees "$roots" "$ps_snap")
 
-  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path; do
+  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact; do
+    # A user ESC-interrupt ends the turn without firing ANY hook — Claude Code has
+    # no interrupt event, and Stop only fires on a normal finish — so `working`
+    # sticks (red) until the next prompt. Cross-check it against tmux's own
+    # activity clock: a working session repaints its spinner and elapsed timer
+    # about once a second, so #{window_activity} is always within a couple of
+    # seconds of now; an interrupted one froze at the prompt and stops advancing.
+    # (Measured: the working session 0s ago, all 12 idle ones >=575s.) The field
+    # rides along in the list-sessions call above, so this costs nothing — no
+    # capture, no sampling delay. Display-only: @claude_state is left alone so
+    # orch keeps reading the same value it always did.
+    [ "$state" = working ] && [ -n "$wact" ] && [ $((now - wact)) -gt 5 ] && state=idle
     pids=""
     while IFS= read -r line; do
       [ "${line%% *}" = "$pid" ] && { pids=${line#* }; break; }
