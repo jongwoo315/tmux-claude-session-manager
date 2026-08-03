@@ -36,6 +36,29 @@ claude_subtrees() {
     }' <<<"$2"
 }
 
+# Pad $1 to $2 DISPLAY columns, result in $PADDED.
+#
+# bash's printf pads `%-44s` by BYTES, not display columns. A UTF-8 Hangul char is
+# 3 bytes but renders 2 columns, so each one spent 3 of the 44-byte budget while
+# advancing the cursor only 2 — the path column drifted LEFT one column per CJK
+# char (a 6-char Korean title landed 6 columns short of the ASCII rows).
+#
+# Width without forking: ${#s} counts characters, and the SAME expansion under
+# LC_ALL=C counts bytes. The surplus bytes identify the wide ones — a 3-byte CJK
+# char and a 4-byte emoji each render 2 columns, a 2-byte accented Latin char
+# renders 1, and (bytes-chars)/2 yields exactly the extra columns in all three.
+# Assigning to a global (not echoing) keeps this fork-free; a $(...) per row would
+# reintroduce the forks the single-ps/single-tmux design removed.
+SPACES='                                                                  '
+pad_display() {
+  local s="$1" want="$2" chars bytes disp
+  chars=${#s}
+  local LC_ALL=C
+  bytes=${#s}
+  disp=$(( chars + (bytes - chars) / 2 ))
+  if [ "$disp" -ge "$want" ]; then PADDED="$s"; else PADDED="$s${SPACES:0:$((want - disp))}"; fi
+}
+
 emit_rows() {
   local now ps_snap fmt sessions roots subtrees line root
   now=$(date +%s)
@@ -108,8 +131,11 @@ emit_rows() {
     if [ -n "$at" ]; then ago="$(((now - at) / 60))m"; else ago='-'; fi
     # rank \t session \t icon \t age \t title(padded) \t path. Title is space-
     # padded (not tab) so fzf's 8-col tabstop doesn't jump the path column; 44 fits
-    # the longest name. rank asc, then age asc (just-finished floats to group top).
-    printf '%s\t%s\t%s\t%5s\t%-44s\t%s\n' "$rank" "$s" "$icon" "$ago" "$title" "${path/#$HOME/~}"
+    # the longest name. Padded by pad_display, NOT printf's %-44s — that pads by
+    # bytes and misaligns any CJK title. rank asc, then age asc (just-finished
+    # floats to group top).
+    pad_display "$title" 44
+    printf '%s\t%s\t%s\t%5s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "${path/#$HOME/~}"
   done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n
 }
 
