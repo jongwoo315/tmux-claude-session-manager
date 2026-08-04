@@ -66,10 +66,21 @@ if [ ! -t 0 ]; then
   # the agent_id gate above correctly discards, so nothing would re-assert working.
   # Recording idle here also made orch read the debounced idle as step-complete and
   # close the task while the session was still working (observed: DEV-7133 marked
-  # done mid-PR-review). Keep the current state instead: when the agents finish they
+  # done mid-PR-review). Record WORKING instead. When the agents finish they
   # re-invoke the parent (UserPromptSubmit -> working), and THAT turn's Stop — with
   # no running entry in background_tasks — lands the real idle.
-  case "$new:$raw" in idle:*'"status":"running"'*) exit 0 ;; esac
+  #
+  # Preserving the current state (the previous behaviour) left no way out for a
+  # session that entered the agent episode already `waiting`: the agents' own tool
+  # events die at the agent_id gate, the SubagentStop guard below refuses to clear
+  # waiting, and this branch preserved it — so the picker showed yellow "waiting"
+  # for a session whose screen read "Waiting for 2 background agents to finish",
+  # until the user's next prompt. Observed 2026-08-05 on upgrade-impact-rag.
+  # The cost is the mirror case: an AskUserQuestion box still up WHILE agents run
+  # gets relabelled working. That needs the box and a live agent episode at once,
+  # which is rarer than what this fixes.
+  # skip_stamp for the same reason as SubagentStop above — one clock per episode.
+  case "$new:$raw" in idle:*'"status":"running"'*) new=working; skip_stamp=true ;; esac
 fi
 
 cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
