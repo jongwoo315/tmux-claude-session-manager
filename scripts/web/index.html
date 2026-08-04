@@ -113,8 +113,8 @@
     state hook has ever timestamped them. A working session never dims; its clock
     counts time busy, not time idle.<br>
     A <b>throbbing</b> dot just handed back — working → idle or working → waiting —
-    and fades over five minutes. That is the moment worth catching; the color change
-    alone is invisible unless you happen to be looking.<br>
+    and fades over five minutes, or stops the moment you attach — a session with the
+    white ring is already on your screen, so there is nothing left to flag.<br>
     Click a row to show its details in the panel.
   </footer>
 </div>
@@ -280,6 +280,11 @@ function upsert(id, data) {
 // DONE_PULSE_MS so it fades out on its own rather than needing to be dismissed.
 function pulseOf(n, now) {
   if (n.state === 'working') return 1 + 0.12 * Math.sin(now / 220)
+  // Attaching IS the acknowledgement. The pulse only means "you are not looking at
+  // this one" — once a tmux client has it on screen that is answered, so clear the
+  // timestamp rather than merely skipping the draw: detaching later must not resume
+  // a ring for a handback you have already seen.
+  if (n.attached) { n.doneAt = 0; return 1 }
   if (!n.doneAt) return 1
   const t = (now - n.doneAt) / DONE_PULSE_MS
   if (t >= 1) { n.doneAt = 0; return 1 }
