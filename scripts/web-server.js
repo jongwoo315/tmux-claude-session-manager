@@ -169,6 +169,10 @@ function readQueue() {
         status: t.status || '?',
         step: `${(t.cursor || 0) + 1}/${(t.steps || []).length || 1}`,
         target: t.target || '',
+        // tmux session that ran `orch add`. Absent on tasks queued before this
+        // field existed, and may name a session that has since exited — the
+        // client falls back to the orch bucket in both cases.
+        parent: t.parent || '',
       })
     } catch {
       // A half-written task file is normal while orch is dispatching. Skip it.

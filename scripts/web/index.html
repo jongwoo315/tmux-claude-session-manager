@@ -96,7 +96,7 @@
         <span><i class="dot" style="background:var(--idle)"></i>idle</span>
         <span><i class="dot" style="background:var(--waiting)"></i>waiting</span>
         <span><i class="dot" style="background:var(--unknown)"></i>dormant</span>
-        <span><i class="dot" style="background:var(--dispatcher)"></i>orch</span>
+        <span><i class="dot" style="background:var(--dispatcher)"></i>orphaned</span>
       </span>
       <span id="mode" class="mode">tree · press <b>r</b></span>
       <span id="conn" class="down">connecting</span>
@@ -333,7 +333,25 @@ function apply(snap) {
     return parent
   }
 
-  if (sessions.some((d) => d.kind === 'task')) {
+  // An orch task hangs off the session that DISPATCHED it, which is the relation
+  // worth seeing: a ticket you kicked off from "6142 policy bot" reads as descended
+  // from it, not as an anonymous entry in a queue.
+  //
+  // Orphans — parent already exited, task queued before the field existed, or
+  // dispatched from outside tmux — fall back to an `orch` bucket rather than to
+  // their path. Their cwd is the worktree, so grouping by path would build a
+  // three-deep chain (~/plab -> .wt -> DEV-7702-usage-fixes) whose deepest level
+  // merely repeats the session label.
+  const live = new Set(sessions.map((d) => d.id))
+  const dispatcherOf = (d) => {
+    const p = d.task && d.task.parent
+    return p && p !== d.id && live.has(p) ? p : null
+  }
+
+  // The bucket exists only while something is in it, so a normal dev-workflow run
+  // (dispatched from a live session) shows no orch node at all, and seeing one
+  // means "a task lost its parent".
+  if (sessions.some((d) => d.kind === 'task' && !dispatcherOf(d))) {
     seen.add('orch')
     upsert('orch', { id: 'orch', kind: 'dispatcher', label: 'orch', state: 'dispatcher', age: '' })
     addChild('#root', 'orch')
@@ -341,7 +359,7 @@ function apply(snap) {
   for (const d of sessions) {
     seen.add(d.id)
     upsert(d.id, d)
-    addChild(d.kind === 'task' ? 'orch' : groupFor(d.path), d.id)
+    addChild(d.kind === 'task' ? dispatcherOf(d) || 'orch' : groupFor(d.path), d.id)
   }
 
   // A real root node, so both layouts have a single origin to branch from.
