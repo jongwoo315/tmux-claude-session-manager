@@ -112,6 +112,9 @@
     Grey <b>dormant</b> sessions have no elapsed time at all — never resumed, so no
     state hook has ever timestamped them. A working session never dims; its clock
     counts time busy, not time idle.<br>
+    A <b>throbbing</b> dot just handed back — working → idle or working → waiting —
+    and fades over five minutes. That is the moment worth catching; the color change
+    alone is invisible unless you happen to be looking.<br>
     Click a row to show its details in the panel.
   </footer>
 </div>
@@ -244,16 +247,23 @@ function clip(text, max) {
   return s + '…'
 }
 
-// A session that just stopped working pulses for a minute. Finishing is the event
-// worth catching — a job you dispatched and walked away from is now your turn —
-// and it is otherwise invisible: the dot merely turns from red to green between
-// two polls, which nobody is watching for.
-const DONE_PULSE_MS = 60000
+// A session that just stopped working pulses for five minutes. Handing back is the
+// event worth catching — a job you dispatched and walked away from now wants you —
+// and it is otherwise invisible: the dot merely turns from red to green between two
+// polls, which nobody is watching for. One minute was too short to survive a coffee
+// break, which is exactly the absence the pulse exists to cover.
+const DONE_PULSE_MS = 300000
+
+// working -> idle (turn finished) and working -> waiting (needs permission, or is
+// asking a question) both mean the session wants you. Listed explicitly rather than
+// "anything but working": working -> unknown just means the hooks went quiet, which
+// is not a handback and should not ring.
+const PULSE_TO = new Set(['idle', 'waiting'])
 
 function upsert(id, data) {
   let n = nodes.get(id)
   // Catch the transition BEFORE the new state overwrites the old one.
-  if (n && n.state === 'working' && data.state && data.state !== 'working') {
+  if (n && n.state === 'working' && PULSE_TO.has(data.state)) {
     n.doneAt = performance.now()
   }
   // New rows slide in from the left rather than appearing mid-canvas, so an
