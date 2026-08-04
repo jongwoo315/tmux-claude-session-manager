@@ -29,6 +29,7 @@ and kills — sessions just show `?` instead of a color.
 - **[fzf](https://github.com/junegunn/fzf)** — the picker UI
 - **[Claude Code](https://claude.com/claude-code)** CLI (the `claude` command)
 - bash; macOS or Linux
+- `node` — only for the optional [web graph](#web-graph-optional); the tmux plugin itself does not need it
 
 ## Install (tpm)
 
@@ -145,6 +146,75 @@ The state machine:
 > Claude Code reloads `hooks` dynamically — no restart needed. Sessions that are
 > already running start reporting status on their next event once the hooks are
 > added.
+
+## Web graph (optional)
+
+Live node-edge graph of the running claude sessions in a browser. Requires `node`
+(no npm install — zero dependencies).
+
+```bash
+node ~/.tmux/plugins/tmux-claude-session-manager/scripts/web-server.js   # then open http://localhost:7878
+node .../web-server.js 9000    # or PORT=9000 — first arg wins
+```
+
+Nothing starts this for you. `git pull` installs the files; the plugin does not
+launch a server, so a fresh checkout serves nothing on 7878 until you run it.
+
+Binds `127.0.0.1` and `::1` only. The payload carries session titles and working
+directory paths, so it is deliberately not reachable from the LAN.
+
+### Run it at login (macOS LaunchAgent)
+
+Survives reboots and restarts on crash. Write
+`~/Library/LaunchAgents/local.claude-session-graph.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.claude-session-graph</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>exec node "$HOME/.tmux/plugins/tmux-claude-session-manager/scripts/web-server.js"</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/tmp/claude-session-graph.log</string>
+  <key>StandardErrorPath</key><string>/tmp/claude-session-graph.log</string>
+</dict>
+</plist>
+```
+
+```bash
+plutil -lint ~/Library/LaunchAgents/local.claude-session-graph.plist   # catch typos first
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.claude-session-graph.plist
+launchctl list | grep claude-session-graph    # 2nd column is the last exit code
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:7878/
+```
+
+Managing it:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/local.claude-session-graph   # restart (do this after a git pull)
+launchctl bootout   gui/$(id -u)/local.claude-session-graph      # stop + unregister
+```
+
+**Why `/bin/zsh -lc` and not `node` directly.** The server shells out to bare
+`tmux`, and Homebrew installs it outside launchd's minimal PATH
+(`/usr/bin:/bin:/usr/sbin:/sbin`). Run node directly and `tmux list-sessions`
+finds nothing — the server answers 200 and streams an **empty graph**, so it
+looks healthy while showing no sessions. A login shell loads the real PATH.
+`exec` then replaces zsh with node so `KeepAlive` supervises the server rather
+than the wrapper shell. Leaving `node` unqualified (rather than
+`/opt/homebrew/bin/node`) keeps the same plist working on Intel Macs, where
+Homebrew lives in `/usr/local/bin`.
+
+**A `git pull` does not restart it.** New server code needs
+`launchctl kickstart -k`, otherwise the old code keeps running.
 
 ## Options
 
