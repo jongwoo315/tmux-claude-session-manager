@@ -54,7 +54,9 @@ const PROMPT_SRC = new Set(['typed', 'queued', 'suggestion_accepted'])
 // this avoids. The successful size is remembered per session so a busy transcript
 // does not re-escalate from scratch on every poll. 4MB is the giving-up point.
 const TAIL_STEPS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024]
-const PROMPT_MAX = 400
+// Long enough to hold a whole multi-line request (the ones with a bullet list and a
+// pasted URL run several hundred chars); the panel scrolls rather than truncating.
+const PROMPT_MAX = 1200
 const promptCache = new Map() // sessionId -> {file, mtimeMs, text, win}
 
 function findTranscript(sid) {
