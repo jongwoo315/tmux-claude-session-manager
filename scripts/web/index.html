@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>claude sessions</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --fg: #e6edf3; --dim: #8b949e;
+    --working: #f85149; --idle: #3fb950; --waiting: #d29922;
+    --unknown: #8b949e; --dispatcher: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); overflow: hidden;
+    font: 13px/1.5 -apple-system, "SF Pro Text", "Apple SD Gothic Neo",
+          "Noto Sans KR", system-ui, sans-serif;
+  }
+  canvas { display: block; position: absolute; inset: 0; }
+  header {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; background: linear-gradient(var(--bg), transparent);
+    pointer-events: none;
+  }
+  .count { font-weight: 600; }
+  .legend { display: flex; gap: 12px; color: var(--dim); }
+  .legend span { display: flex; gap: 5px; align-items: center; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; }
+  #conn { margin-left: auto; color: var(--dim); }
+  #conn.live::before { content: "● "; color: var(--idle); }
+  #conn.down::before { content: "● "; color: var(--working); }
+  aside {
+    position: absolute; right: 14px; bottom: 14px; z-index: 2; width: 320px;
+    max-width: calc(100vw - 28px); padding: 12px 14px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    display: none;
+  }
+  aside.open { display: block; }
+  aside h2 { margin: 0 0 8px; font-size: 14px; }
+  aside dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; }
+  aside dt { color: var(--dim); }
+  aside dd { margin: 0; word-break: break-all; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  aside button {
+    position: absolute; top: 8px; right: 8px; background: none; border: 0;
+    color: var(--dim); font-size: 16px; cursor: pointer; line-height: 1;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<header>
+  <span class="count" id="count">…</span>
+  <span class="legend">
+    <span><i class="dot" style="background:var(--working)"></i>working</span>
+    <span><i class="dot" style="background:var(--idle)"></i>idle</span>
+    <span><i class="dot" style="background:var(--waiting)"></i>waiting</span>
+    <span><i class="dot" style="background:var(--dispatcher)"></i>orch</span>
+  </span>
+  <span id="conn" class="down">connecting</span>
+</header>
+<aside id="panel"><button id="close">×</button><h2 id="ptitle"></h2><dl id="pbody"></dl></aside>
+
+<script>
+'use strict'
+const COLOR = {
+  working: '#f85149', idle: '#3fb950', waiting: '#d29922',
+  unknown: '#8b949e', dispatcher: '#a371f7',
+}
+const FADE_MS = 700          // how long a dead node lingers while shrinking
+const canvas = document.getElementById('c')
+const ctx = canvas.getContext('2d')
+let W = 0, H = 0
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1
+  W = canvas.clientWidth; H = canvas.clientHeight
+  canvas.width = W * dpr; canvas.height = H * dpr
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+}
+window.addEventListener('resize', resize)
+
+// id -> node. Positions survive across snapshots so the layout does not jump
+// every poll; only membership changes animate.
+const nodes = new Map()
+let edges = []
+let selected = null
+
+function radius(n) {
+  const base = n.kind === 'dispatcher' ? 26 : 18
+  return base * n.scale
+}
+
+function apply(snap) {
+  const seen = new Set()
+  for (const d of snap.nodes) {
+    seen.add(d.id)
+    let n = nodes.get(d.id)
+    if (!n) {
+      // Spawn near the dispatcher when there is one, so children visibly grow
+      // out of their parent instead of teleporting in from a random corner.
+      const p = nodes.get('orch')
+      const ox = p ? p.x : W / 2, oy = p ? p.y : H / 2
+      n = {
+        x: ox + (Math.random() - 0.5) * 120,
+        y: oy + (Math.random() - 0.5) * 120,
+        vx: 0, vy: 0, scale: 0.1, dead: 0,
+      }
+      nodes.set(d.id, n)
+    }
+    Object.assign(n, d, { x: n.x, y: n.y, vx: n.vx, vy: n.vy, scale: n.scale, dead: 0 })
+  }
+  for (const [id, n] of nodes) if (!seen.has(id) && !n.dead) n.dead = performance.now()
+  edges = snap.edges
+
+  const live = snap.nodes.filter((n) => n.kind !== 'dispatcher')
+  const busy = live.filter((n) => n.state === 'working').length
+  document.getElementById('count').textContent =
+    `${live.length} sessions · ${busy} working`
+}
+
+function step(dt) {
+  const now = performance.now()
+  const list = [...nodes.values()]
+
+  for (const [id, n] of nodes) {
+    if (n.dead) {
+      n.scale = Math.max(0, 1 - (now - n.dead) / FADE_MS)
+      if (n.scale <= 0) nodes.delete(id)
+    } else if (n.scale < 1) {
+      n.scale = Math.min(1, n.scale + dt * 3)
+    }
+  }
+
+  // Repulsion. n² is fine — this tops out around 20 sessions.
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i], b = list[j]
+      let dx = b.x - a.x, dy = b.y - a.y
+      let d2 = dx * dx + dy * dy
+      if (d2 < 1) { dx = Math.random(); dy = Math.random(); d2 = 1 }
+      const f = 26000 / d2
+      const d = Math.sqrt(d2)
+      a.vx -= (dx / d) * f * dt; a.vy -= (dy / d) * f * dt
+      b.vx += (dx / d) * f * dt; b.vy += (dy / d) * f * dt
+    }
+  }
+  // Springs on orch -> session edges.
+  for (const e of edges) {
+    const a = nodes.get(e.source), b = nodes.get(e.target)
+    if (!a || !b) continue
+    const dx = b.x - a.x, dy = b.y - a.y
+    const d = Math.hypot(dx, dy) || 1
+    const f = (d - 170) * 1.4
+    a.vx += (dx / d) * f * dt; a.vy += (dy / d) * f * dt
+    b.vx -= (dx / d) * f * dt; b.vy -= (dy / d) * f * dt
+  }
+  // Gravity toward centre + damping, then clamp inside the viewport.
+  for (const n of list) {
+    n.vx += (W / 2 - n.x) * 0.35 * dt
+    n.vy += (H / 2 - n.y) * 0.35 * dt
+    n.vx *= 0.86; n.vy *= 0.86
+    n.x += n.vx * dt * 60; n.y += n.vy * dt * 60
+    const r = radius(n) + 30
+    n.x = Math.min(W - r, Math.max(r, n.x))
+    n.y = Math.min(H - r, Math.max(r, n.y))
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H)
+
+  ctx.lineWidth = 1.5
+  for (const e of edges) {
+    const a = nodes.get(e.source), b = nodes.get(e.target)
+    if (!a || !b) continue
+    ctx.globalAlpha = Math.min(a.scale, b.scale) * 0.45
+    ctx.strokeStyle = b.state === 'working' ? COLOR.working : '#30363d'
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+  }
+
+  for (const n of nodes.values()) {
+    const r = radius(n)
+    ctx.globalAlpha = n.scale
+    // A working node breathes so a busy graph reads as alive at a glance.
+    const pulse = n.state === 'working' ? 1 + 0.08 * Math.sin(performance.now() / 220) : 1
+    ctx.fillStyle = COLOR[n.state] || COLOR.unknown
+    ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse, 0, Math.PI * 2); ctx.fill()
+
+    if (n.attached) {
+      ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 2
+      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + 4, 0, Math.PI * 2); ctx.stroke()
+    }
+    if (selected === n.id) {
+      ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 2
+      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + 9, 0, Math.PI * 2); ctx.stroke()
+    }
+
+    ctx.fillStyle = '#e6edf3'
+    ctx.textAlign = 'center'
+    ctx.font = '600 12px -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif'
+    ctx.fillText(n.label || n.id, n.x, n.y + r + 16)
+    if (n.age && n.age !== '-') {
+      ctx.fillStyle = '#8b949e'
+      ctx.font = '11px ui-monospace, Menlo, monospace'
+      ctx.fillText(n.age, n.x, n.y + r + 30)
+    }
+  }
+  ctx.globalAlpha = 1
+}
+
+let prev = performance.now()
+function frame(now) {
+  const dt = Math.min(0.05, (now - prev) / 1000)
+  prev = now
+  step(dt); draw()
+  requestAnimationFrame(frame)
+}
+
+const panel = document.getElementById('panel')
+document.getElementById('close').onclick = () => { selected = null; panel.classList.remove('open') }
+canvas.addEventListener('click', (ev) => {
+  const x = ev.clientX, y = ev.clientY
+  let hit = null
+  for (const n of nodes.values()) if (Math.hypot(n.x - x, n.y - y) <= radius(n) + 6) hit = n
+  if (!hit) { selected = null; panel.classList.remove('open'); return }
+  selected = hit.id
+  document.getElementById('ptitle').textContent = hit.label || hit.id
+  const rows = [['session', hit.id], ['state', hit.state]]
+  if (hit.path) rows.push(['path', hit.path])
+  if (hit.age && hit.age !== '-') rows.push(['age', hit.age])
+  if (hit.attached) rows.push(['attached', 'yes'])
+  if (hit.task) {
+    rows.push(['task', hit.task.id], ['status', hit.task.status], ['step', hit.task.step])
+    if (hit.task.target) rows.push(['worktree', hit.task.target])
+  }
+  document.getElementById('pbody').innerHTML =
+    rows.map(([k, v]) => `<dt>${k}</dt><dd></dd>`).join('')
+  // Set text via textContent so a session title can never inject markup.
+  document.querySelectorAll('#pbody dd').forEach((dd, i) => { dd.textContent = rows[i][1] })
+  panel.classList.add('open')
+})
+
+const conn = document.getElementById('conn')
+function connect() {
+  const es = new EventSource('/events')
+  es.onopen = () => { conn.className = 'live'; conn.textContent = 'live' }
+  es.onmessage = (ev) => apply(JSON.parse(ev.data))
+  es.onerror = () => { conn.className = 'down'; conn.textContent = 'reconnecting' }
+}
+
+resize(); connect(); requestAnimationFrame(frame)
+</script>
+</body>
+</html>
