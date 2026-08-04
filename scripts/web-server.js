@@ -246,7 +246,14 @@ const handler = async (req, res) => {
       res.end(`cannot read ${PAGE}: ${err.message}`)
       return
     }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    // no-store, because the page is the source file and it gets edited constantly.
+    // Served without any validator (no ETag, no Last-Modified) a browser falls back
+    // to heuristic caching and will happily re-run yesterday's JS on a plain reload —
+    // which reads as "the fix did not work" rather than "you are looking at old code".
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    })
     res.end(buf)
   })
 }
