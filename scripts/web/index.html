@@ -14,26 +14,56 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    background: var(--bg); color: var(--fg); overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    /* Scrolls only when the block is taller than the window. */
+    overflow-y: auto; overflow-x: hidden;
     font: 13px/1.5 -apple-system, "SF Pro Text", "Apple SD Gothic Neo",
           "Noto Sans KR", system-ui, sans-serif;
+    /* Centre the whole figure in the window. `margin: auto` on the child rather
+       than `align-items: center`, because auto margins stop at the top edge when
+       the content outgrows the viewport — centring would push the header off
+       screen with no way to scroll back up to it. */
+    min-height: 100%; display: flex;
   }
-  canvas { display: block; position: absolute; inset: 0; }
+  /* One centred column: caption, tree, caption. The header used to be pinned to
+     the viewport edges while the tree was centred, so the two never lined up and
+     the text read as browser chrome rather than as part of the figure. In flow,
+     the block also simply grows downward as sessions are added. */
+  /* Tight at the page edges, generous between caption and figure — the gaps that
+     separate the diagram from its explanations should read larger than the gaps
+     that separate the block from the window. */
+  .shell { width: 100%; max-width: 1280px; margin: auto; padding: 72px 26px 72px; }
+  canvas { display: block; width: 100%; }
   header {
-    position: absolute; top: 0; left: 0; right: 0; z-index: 2;
-    display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
-    padding: 10px 14px; background: linear-gradient(var(--bg), transparent);
-    pointer-events: none;
+    display: flex; flex-direction: column; gap: 4px;
+    padding-bottom: 14px; margin-bottom: 52px;
+    border-bottom: 1px solid var(--line);
   }
+  .bar { display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; }
+  h1 {
+    margin: 0; font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--fg);
+  }
+  .sub { margin: 0; font-size: 11.5px; color: var(--dim); }
+  .sub b { color: var(--fg); font-weight: 600; }
   .count { font-weight: 600; }
   .legend { display: flex; gap: 12px; color: var(--dim); }
   .legend span { display: flex; gap: 5px; align-items: center; }
   .dot { width: 9px; height: 9px; border-radius: 50%; }
-  #conn { margin-left: auto; color: var(--dim); }
+  .mode { margin-left: auto; color: var(--dim); }
+  .mode b { color: var(--fg); font-weight: 600; }
+  #conn { color: var(--dim); }
   #conn.live::before { content: "● "; color: var(--idle); }
   #conn.down::before { content: "● "; color: var(--working); }
+  footer {
+    margin-top: 52px; padding-top: 14px; border-top: 1px solid var(--line);
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px; line-height: 1.8; color: var(--dim);
+  }
+  footer b { color: var(--fg); font-weight: 600; }
   aside {
-    position: absolute; right: 14px; bottom: 14px; z-index: 2; width: 320px;
+    position: fixed; right: 14px; bottom: 14px; z-index: 2; width: 320px;
     max-width: calc(100vw - 28px); padding: 12px 14px;
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
     display: none;
@@ -50,17 +80,35 @@
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
-<header>
-  <span class="count" id="count">…</span>
-  <span class="legend">
-    <span><i class="dot" style="background:var(--working)"></i>working</span>
-    <span><i class="dot" style="background:var(--idle)"></i>idle</span>
-    <span><i class="dot" style="background:var(--waiting)"></i>waiting</span>
-    <span><i class="dot" style="background:var(--dispatcher)"></i>orch</span>
-  </span>
-  <span id="conn" class="down">connecting</span>
-</header>
+<div class="shell" id="shell">
+  <header>
+    <div class="bar">
+      <h1>Session Tree</h1>
+      <span class="count" id="count">…</span>
+      <span class="legend">
+        <span><i class="dot" style="background:var(--working)"></i>working</span>
+        <span><i class="dot" style="background:var(--idle)"></i>idle</span>
+        <span><i class="dot" style="background:var(--waiting)"></i>waiting</span>
+        <span><i class="dot" style="background:var(--unknown)"></i>dormant</span>
+        <span><i class="dot" style="background:var(--dispatcher)"></i>orch</span>
+      </span>
+      <span id="mode" class="mode">tree · press <b>r</b></span>
+      <span id="conn" class="down">connecting</span>
+    </div>
+    <p class="sub">Live tmux Claude sessions, branched by working directory.
+      Orch-dispatched sessions hang off <b>orch</b> instead of their directory.</p>
+  </header>
+  <canvas id="c"></canvas>
+  <footer>
+    <b>Order</b> matches the tmux picker: waiting → idle → unknown → working, then
+    freshest first. A busy session sinks to the bottom — it is the one to leave alone.<br>
+    <b>Brightness</b> falls off with idle time: a dim dot has sat untouched for days.
+    Grey <b>dormant</b> sessions have no elapsed time at all — never resumed, so no
+    state hook has ever timestamped them. A working session never dims; its clock
+    counts time busy, not time idle.<br>
+    Click a row to show its details in the panel.
+  </footer>
+</div>
 <aside id="panel"><button id="close">×</button><h2 id="ptitle"></h2><dl id="pbody"></dl></aside>
 
 <script>
@@ -72,59 +120,426 @@ const COLOR = {
 const FADE_MS = 700          // how long a dead node lingers while shrinking
 const canvas = document.getElementById('c')
 const ctx = canvas.getContext('2d')
-let W = 0, H = 0
+// H is the CANVAS height, which may exceed VH (the viewport) when the tree is
+// taller than the window — the page scrolls in that case. Scaling decisions read
+// VH; drawing reads H.
+let W = 0, H = 0, VH = 0
 
-function resize() {
+function resize(contentH) {
   const dpr = window.devicePixelRatio || 1
-  W = canvas.clientWidth; H = canvas.clientHeight
+  VH = window.innerHeight
+  W = canvas.clientWidth
+  // The canvas may be SHORTER than the viewport: a short tree then ends where it
+  // ends, and body background carries on below. Forcing it to viewport height
+  // instead created a void that the tree had to be centred in, which is what put
+  // 300px of dead space above and below a 360px tree.
+  H = contentH || VH
+  canvas.style.height = H + 'px'
   canvas.width = W * dpr; canvas.height = H * dpr
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 }
-window.addEventListener('resize', resize)
+// Row pitch is derived from viewport height, so a resize has to re-run the
+// layout — otherwise rows keep the old spacing and run off the bottom.
+let lastSnap = null
+window.addEventListener('resize', () => { resize(); if (lastSnap) apply(lastSnap) })
 
 // id -> node. Positions survive across snapshots so the layout does not jump
 // every poll; only membership changes animate.
 const nodes = new Map()
-let edges = []
 let selected = null
+let rows = []                // every node in DFS order (root, groups, sessions)
+let leaves = []              // rows that have no children — they own the slots
+let maxDepth = 0
+let rowH = 28
+let S = 1                    // UI scale, see fitScale()
 
-function radius(n) {
-  const base = n.kind === 'dispatcher' ? 26 : 18
-  return base * n.scale
+// Two layouts over ONE hierarchy: only coordinate assignment differs, so the
+// tree building, sorting, hit-testing and drawing are shared.
+let mode = 'tree'
+try { mode = localStorage.getItem('claude-graph-mode') || 'tree' } catch { /* private mode */ }
+
+const ROW_BASE = 28
+// PAD_X is the left margin. The root's label is drawn to the RIGHT of its dot, so
+// this is the gutter before the dot itself — too small and CLAUDE reads as pinned
+// to the window edge.
+// Vertical slack INSIDE the canvas is only what a dot needs so it is not clipped
+// at the bitmap edge (radius + the attached/selected ring). All *visible* spacing
+// above and below the figure is the header/footer CSS margins — one knob instead
+// of two stacking, and identical in both layouts, so switching t/r no longer
+// shifts the diagram. PAD_X still matters: it is the horizontal fallback margin.
+const PAD_X = 60, PAD_Y = 12, PAD_BOTTOM = 12
+// Fallback only — the real value is measured below.
+const CHROME = 300
+
+// Everything in the shell except the canvas: captions, rules, their margins and
+// the shell padding. MEASURED, not assumed: it was a 260px constant while the real
+// figure was ~370px, so the layout believed it had ~110px more room than existed
+// and would size a tall tree into a scroll it thought it had avoided. Measuring
+// also makes the margins mean something — widen them and the diagram yields.
+function chromeH() {
+  const sh = document.getElementById('shell')
+  if (!sh) return CHROME
+  const h = sh.getBoundingClientRect().height - canvas.getBoundingClientRect().height
+  return h > 40 ? h : CHROME
 }
 
+// One height budget shared by BOTH layouts, so pressing t/r swaps the arrangement
+// without the page resizing under the cursor.
+function targetH() {
+  return Math.max(300, VH - chromeH() - 8)
+}
+// Mirrors picker.sh exactly (rank asc, then age asc). NOT "busiest first" — the
+// picker deliberately sinks `working` to the bottom: a busy session is the one you
+// should leave alone, while `waiting` is blocked on you and `idle` is your turn.
+// Age ascending floats the just-finished to the top of each group.
+const RANK = { waiting: 0, idle: 1, working: 3 }
+const RANK_OTHER = 2 // unknown / no state hook yet
+function rankOf(n) { return RANK[n.state] ?? RANK_OTHER }
+// "9868m" -> 9868; "-" and "" -> 0, matching `sort -n` on the picker's age column.
+function ageMin(n) { const m = /^(\d+)m$/.exec(n.age || ''); return m ? Number(m[1]) : 0 }
+
+// Everything (rows, fonts, dots, gaps) scales by ONE factor, so the tree keeps
+// its proportions whether it is filling a wide monitor or squeezed into a narrow
+// window. The factor is chosen in layoutTree by measuring the natural size first.
+
+function radius(n) {
+  const base = n.kind === 'dispatcher' ? 8 : n.kind === 'group' ? 3.5 : 6
+  return base * S * n.scale
+}
+
+// Vertical slack a row needs so nothing it draws is clipped at the bitmap edge.
+// A dot is not just its radius: the just-finished pulse swells it to 1.55x, and
+// the attached/selected rings sit 7px outside that. A flat 12px was smaller than
+// the ring on the largest dot, so the top row's selection ring was cut off.
+function decorPad() {
+  return Math.ceil(8 * S * 1.55 + 7 + 2)
+}
+
+// Dot opacity falls off with idle time, so a wall of green stops reading as one
+// undifferentiated block: a session touched minutes ago burns full strength, one
+// untouched for a week is visibly dim. Floors at 0.5 — below that the state
+// colour stops being distinguishable, and the point is to rank attention, not to
+// hide rows. `age` arrives as the picker's rendered string ("9868m", or "-" when
+// the session has never been resumed); anything unparseable is treated as dormant
+// and sits below a fresh session but above a stale one.
+const MAX_AGE_MIN = 12000 // ~8 days: past this everything is equally cold
+function vitality(n) {
+  const m = /^(\d+)m$/.exec(n.age || '')
+  if (!m) return 0.55
+  return 1 - 0.5 * Math.min(Number(m[1]) / MAX_AGE_MIN, 1)
+}
+
+// Trim to fit the remaining width so a long title never bleeds off the canvas.
+function clip(text, max) {
+  if (max <= 0) return ''
+  if (ctx.measureText(text).width <= max) return text
+  let s = text
+  while (s.length > 1 && ctx.measureText(s + '…').width > max) s = s.slice(0, -1)
+  return s + '…'
+}
+
+// A session that just stopped working pulses for a minute. Finishing is the event
+// worth catching — a job you dispatched and walked away from is now your turn —
+// and it is otherwise invisible: the dot merely turns from red to green between
+// two polls, which nobody is watching for.
+const DONE_PULSE_MS = 60000
+
+function upsert(id, data) {
+  let n = nodes.get(id)
+  // Catch the transition BEFORE the new state overwrites the old one.
+  if (n && n.state === 'working' && data.state && data.state !== 'working') {
+    n.doneAt = performance.now()
+  }
+  // New rows slide in from the left rather than appearing mid-canvas, so an
+  // arriving session reads as "added to the list" instead of teleporting.
+  if (!n) { n = { x: -40, y: PAD_Y, tx: -40, ty: PAD_Y, scale: 0.1, dead: 0 }; nodes.set(id, n) }
+  Object.assign(n, data, {
+    x: n.x, y: n.y, tx: n.tx, ty: n.ty, scale: n.scale, dead: 0, doneAt: n.doneAt,
+  })
+  return n
+}
+
+// Radius multiplier for the attention animations. A working dot breathes so a busy
+// tree reads as alive; a just-finished one rings louder and decays to nothing over
+// DONE_PULSE_MS so it fades out on its own rather than needing to be dismissed.
+function pulseOf(n, now) {
+  if (n.state === 'working') return 1 + 0.12 * Math.sin(now / 220)
+  if (!n.doneAt) return 1
+  const t = (now - n.doneAt) / DONE_PULSE_MS
+  if (t >= 1) { n.doneAt = 0; return 1 }
+  return 1 + (1 - t) * 0.55 * Math.abs(Math.sin(now / 260))
+}
+
+// Build a tree and flatten it to indented rows.
+//
+// Why not a force graph: the server only emits edges for orch TASKS, so a
+// workspace with an empty queue has ZERO edges. A force layout then has nothing
+// to organise — every node just repels every other into overlapping rows with
+// labels stacked on top of each other. The hierarchy that ALWAYS exists is the
+// working directory, so group by that; orch tasks hang off the dispatcher
+// instead, since that parentage is the more meaningful relation when it exists.
+//
+// Indented rows (one node per line) rather than a centred node-link tree: session
+// labels run 40+ characters, so any layout placing siblings side by side collides.
+// One row each makes overlap structurally impossible.
 function apply(snap) {
   const seen = new Set()
-  for (const d of snap.nodes) {
-    seen.add(d.id)
-    let n = nodes.get(d.id)
-    if (!n) {
-      // Spawn near the dispatcher when there is one, so children visibly grow
-      // out of their parent instead of teleporting in from a random corner.
-      const p = nodes.get('orch')
-      const ox = p ? p.x : W / 2, oy = p ? p.y : H / 2
-      n = {
-        x: ox + (Math.random() - 0.5) * 120,
-        y: oy + (Math.random() - 0.5) * 120,
-        vx: 0, vy: 0, scale: 0.1, dead: 0,
-      }
-      nodes.set(d.id, n)
-    }
-    Object.assign(n, d, { x: n.x, y: n.y, vx: n.vx, vy: n.vy, scale: n.scale, dead: 0 })
-  }
-  for (const [id, n] of nodes) if (!seen.has(id) && !n.dead) n.dead = performance.now()
-  edges = snap.edges
+  const kids = new Map()
+  const addChild = (p, c) => { (kids.get(p) || kids.set(p, []).get(p)).push(c) }
 
-  const live = snap.nodes.filter((n) => n.kind !== 'dispatcher')
-  const busy = live.filter((n) => n.state === 'working').length
+  const sessions = snap.nodes.filter((d) => d.kind !== 'dispatcher')
+
+  // Directory groups, nested by path segment. "~" is dropped as a level — every
+  // path shares it, so a "~" node would add depth without distinguishing anything.
+  const madeGroup = new Set()
+  const groupFor = (path) => {
+    const raw = String(path || '~')
+    // filter(Boolean) drops empty segments: an absolute path (when picker cannot
+    // shorten it to ~, e.g. a dir outside $HOME) starts with "/", and the leading
+    // empty segment would otherwise render a phantom "~//" level.
+    const segs = raw.replace(/^~\/?/, '').split('/').filter(Boolean)
+    let parent = '#root', acc = raw.startsWith('~') ? '~' : ''
+    for (const seg of segs) {
+      acc = acc ? acc + '/' + seg : '/' + seg
+      const gid = 'grp:' + acc
+      if (!madeGroup.has(gid)) {
+        madeGroup.add(gid); seen.add(gid)
+        upsert(gid, { id: gid, kind: 'group', label: acc, state: 'group', age: '' })
+        addChild(parent, gid)
+      }
+      parent = gid
+    }
+    return parent
+  }
+
+  if (sessions.some((d) => d.kind === 'task')) {
+    seen.add('orch')
+    upsert('orch', { id: 'orch', kind: 'dispatcher', label: 'orch', state: 'dispatcher', age: '' })
+    addChild('#root', 'orch')
+  }
+  for (const d of sessions) {
+    seen.add(d.id)
+    upsert(d.id, d)
+    addChild(d.kind === 'task' ? 'orch' : groupFor(d.path), d.id)
+  }
+
+  // A real root node, so both layouts have a single origin to branch from.
+  seen.add('#root')
+  upsert('#root', { id: '#root', kind: 'root', label: 'CLAUDE', state: 'root', age: '' })
+
+  for (const [id, n] of nodes) if (!seen.has(id) && !n.dead) n.dead = performance.now()
+
+  // Flatten depth-first. Sessions before sub-groups, and busiest first, so the
+  // rows that need attention sit at the top of each group.
+  const order = []
+  const walk = (n, depth) => {
+    n.depth = depth
+    maxDepth = Math.max(maxDepth, depth)
+    order.push(n)
+    const list = (kids.get(n.id) || []).map((c) => nodes.get(c)).filter(Boolean)
+    list.sort((a, b) => {
+      if ((a.kind === 'group') !== (b.kind === 'group')) return a.kind === 'group' ? 1 : -1
+      return (rankOf(a) - rankOf(b)) || (ageMin(a) - ageMin(b)) ||
+        String(a.label).localeCompare(String(b.label))
+    })
+    n.kids = list
+    if (!list.length) leaves.push(n)
+    for (const c of list) walk(c, depth + 1)
+  }
+  maxDepth = 0; leaves = []
+  walk(nodes.get('#root'), 0)
+  rows = order
+
+  layout()
+
+  const busy = sessions.filter((n) => n.state === 'working').length
   document.getElementById('count').textContent =
-    `${live.length} sessions · ${busy} working`
+    `${sessions.length} sessions · ${busy} working`
+}
+
+// Slots belong to LEAVES; a parent is placed at the midpoint of its children.
+// That is what makes a branch fan out from its parent instead of hanging below
+// it, and it is the one rule both layouts share — tree spends the slot on y,
+// radial spends it on angle.
+function assignSlots() {
+  leaves.forEach((n, i) => { n.slot = i })
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const n = rows[i]
+    if (n.kids && n.kids.length) {
+      n.slot = (n.kids[0].slot + n.kids[n.kids.length - 1].slot) / 2
+    }
+  }
+}
+
+function layout() {
+  assignSlots()
+  if (mode === 'radial') layoutRadial()
+  else layoutTree()
+}
+
+// Width a node's text actually occupies, so columns can be sized to content.
+function textWidth(n) {
+  if (n.kind === 'root') { ctx.font = `600 ${11 * S}px ui-monospace, Menlo, monospace`; return ctx.measureText('CLAUDE').width }
+  if (n.kind === 'group') { ctx.font = `600 ${12 * S}px ui-monospace, Menlo, monospace`; return ctx.measureText(n.label).width }
+  ctx.font = `600 ${12 * S}px -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif`
+  let w = ctx.measureText(n.label || n.id).width
+  if (n.age && n.age !== '-') {
+    ctx.font = `${11 * S}px ui-monospace, Menlo, monospace`
+    w += 10 * S + ctx.measureText(n.age).width
+  }
+  return w
+}
+
+// Natural geometry of the tree at the CURRENT S: column offsets plus how far it
+// reaches left (the root's label hangs left of its dot) and right (leaf labels).
+// Columns are sized to their own content — a fixed slice of the viewport gave the
+// root column the same width as the deepest path label, stranding "CLAUDE" in
+// blank canvas. Only nodes WITH children set a column width; a leaf's label ends
+// the row, so it never has to clear anything.
+function measureTree() {
+  const need = []
+  for (const n of rows) {
+    if (!n.kids || !n.kids.length) continue
+    need[n.depth] = Math.max(need[n.depth] || 0, textWidth(n))
+  }
+  // Kept small relative to the type: this is the empty run between a node and its
+  // children, and it is the first thing that looks stretched when the tree grows.
+  const GAP = 30 * S, MIN_COL = 74 * S
+  const colX = [0]
+  for (let d = 1; d <= maxDepth; d++) {
+    colX[d] = colX[d - 1] + Math.max(MIN_COL, (need[d - 1] || 0) + GAP)
+  }
+  ctx.font = `600 ${11 * S}px ui-monospace, Menlo, monospace`
+  const left = ctx.measureText('CLAUDE').width + 22 * S
+  let right = 0
+  for (const n of rows) right = Math.max(right, colX[n.depth] + 16 * S + textWidth(n))
+  return { colX, left, w: left + right, h: (leaves.length - 1) * ROW_BASE * S }
+}
+
+function layoutTree() {
+  const availW = W - PAD_X * 2
+  const pad = decorPad()
+  const availH = targetH() - pad * 2
+
+  // Scale UP as well as down. Previously S was capped at 1 and the row pitch at
+  // 46px, so on a large window the tree sat small in the middle of a mostly empty
+  // canvas — the artifact avoids this by sizing its canvas to the content, which
+  // a viewport-filling canvas cannot do. Two passes: measure at 1:1, take the
+  // uniform scale that fits both axes, then re-measure at that scale (text width
+  // tracks font size, so one correction lands it). Capped, or a two-node tree
+  // balloons to fill a monitor.
+  S = 1
+  const nat = measureTree()
+  // Width is claimed by the TYPE, not by the branches. Those are the only two
+  // horizontal consumers, so filling the canvas with short branches means the
+  // labels must take the slack — hence a gap that is small relative to the type
+  // (above) and a scale allowed to rise until the row fills the width.
+  S = Math.max(0.55, Math.min(1.25,
+    Math.min(availW / Math.max(1, nat.w), availH / Math.max(1, nat.h))))
+  const g = measureTree()
+
+  // Widen the COLUMNS (not the text) to reach the available width. Iterated:
+  // scaling the columns does not scale the labels hanging off them, so the total
+  // width grows by less than the factor applied and a single pass undershoots.
+  //
+  // The cap is deliberately modest. Chasing the full width stretched the branches
+  // into long empty runs between a node and its children — filling the canvas is
+  // not worth the tree reading as sparse. Leftover space becomes margin instead.
+  let applied = 1
+  for (let i = 0; i < 10; i++) {
+    const k = Math.min(availW / Math.max(1, g.w), 1.7 / applied)
+    if (k <= 1.002) break
+    applied *= k
+    for (let d = 1; d <= maxDepth; d++) g.colX[d] *= k
+    let right = 0
+    for (const n of rows) right = Math.max(right, g.colX[n.depth] + 16 * S + textWidth(n))
+    g.w = g.left + right
+  }
+
+  // Row pitch may then stretch FURTHER than the uniform scale, without growing
+  // the type. Width is almost always the binding constraint (labels are long and
+  // the tree is short), so a purely uniform fit leaves the lower half of a tall
+  // window empty. Extra leading costs nothing; bigger fonts would just shout.
+  // Natural leading, NOT stretch-to-fill. Claiming the whole height budget and
+  // spreading the rows into it made the tree inflate to whatever space happened to
+  // be free, while radial sized itself to what it actually needed — the same
+  // diagram looked airier in one mode than the other. Both hug their content now;
+  // leftover height stays as page margin.
+  const tight = ROW_BASE * S
+  const gaps = Math.max(1, leaves.length - 1)
+  rowH = Math.min(tight * 1.3, Math.max(tight, availH / gaps))
+  const treeH = gaps * rowH
+
+  // Hug the tree, exactly as radial hugs its ring.
+  resize(pad + treeH + pad)
+  // Centred on both axes.
+  const originX = g.left + Math.max(PAD_X, (W - g.w) / 2)
+  const top = Math.max(pad, (H - treeH) / 2)
+  for (const n of rows) {
+    n.tx = originX + g.colX[n.depth]
+    n.ty = top + n.slot * rowH
+  }
+}
+
+function layoutRadial() {
+  // Same type scale as the tree, so switching modes changes the arrangement and
+  // nothing else. Pinning S at 1 here made the labels and dots visibly smaller in
+  // radial than in tree on the same window.
+  S = 1
+  const nat = measureTree()
+  S = Math.max(0.55, Math.min(1.25, (W - PAD_X * 2) / Math.max(1, nat.w)))
+  rowH = ROW_BASE * S
+
+  const viewH = targetH()
+  const n0 = Math.max(1, leaves.length)
+  const angleOf = (n) => (n.slot / n0) * Math.PI * 2 - Math.PI / 2
+
+  // Grow the ring until it FILLS the shared height budget (or runs out of width).
+  //
+  // Sizing it from maxDepth alone under-filled twice over: most leaves sit
+  // shallower than the deepest branch, and none need land at the ring's very top
+  // or bottom. The ring then floated in the middle of the budget with ~120px of
+  // slack, so the captions sat far from the figure in radial while hugging it in
+  // tree. Iterated because the width limit is not linear in the radius — labels
+  // are a fixed length hanging off it, so they do not scale with the ring.
+  const pad = decorPad()
+  let ring = Math.max(40, Math.min(W / 2 - 170 * S, viewH / 2 - pad) / Math.max(1, maxDepth))
+  for (let i = 0; i < 8; i++) {
+    let extY = 0, reach = 0
+    for (const n of rows) {
+      const a = angleOf(n), r = n.depth * ring
+      extY = Math.max(extY, Math.abs(Math.sin(a)) * r)
+      reach = Math.max(reach, Math.abs(Math.cos(a)) * r + 16 * S + textWidth(n))
+    }
+    const k = Math.min(
+      (viewH / 2 - pad) / Math.max(1, extY),
+      (W / 2 - 12) / Math.max(1, reach),
+    )
+    if (k > 0.99 && k < 1.01) break
+    ring = Math.max(30, ring * Math.max(0.6, Math.min(1.4, k)))
+  }
+
+  // Hug the ring rather than claim the tree's full budget. The ring is limited by
+  // WIDTH — the labels hang off it at a fixed length — so it usually cannot grow
+  // to fill the height, and padding it to match the tree only pushed the captions
+  // ~100px away from the figure. Tight captions beat an identical page height.
+  let ext = 0
+  for (const n of rows) ext = Math.max(ext, Math.abs(Math.sin(angleOf(n))) * n.depth * ring)
+  resize(Math.min(viewH, ext * 2 + pad * 2))
+  const cx = W / 2, cy = H / 2
+  for (const n of rows) {
+    // Leaves land on evenly spaced angles; parents inherit their midpoint. The
+    // -90° turn puts slot 0 at the top so the ring reads clockwise from noon.
+    const a = angleOf(n)
+    const r = n.depth * ring
+    n.angle = a
+    n.tx = cx + Math.cos(a) * r
+    n.ty = cy + Math.sin(a) * r
+  }
 }
 
 function step(dt) {
   const now = performance.now()
-  const list = [...nodes.values()]
-
   for (const [id, n] of nodes) {
     if (n.dead) {
       n.scale = Math.max(0, 1 - (now - n.dead) / FADE_MS)
@@ -132,81 +547,136 @@ function step(dt) {
     } else if (n.scale < 1) {
       n.scale = Math.min(1, n.scale + dt * 3)
     }
-  }
-
-  // Repulsion. n² is fine — this tops out around 20 sessions.
-  for (let i = 0; i < list.length; i++) {
-    for (let j = i + 1; j < list.length; j++) {
-      const a = list[i], b = list[j]
-      let dx = b.x - a.x, dy = b.y - a.y
-      let d2 = dx * dx + dy * dy
-      if (d2 < 1) { dx = Math.random(); dy = Math.random(); d2 = 1 }
-      const f = 26000 / d2
-      const d = Math.sqrt(d2)
-      a.vx -= (dx / d) * f * dt; a.vy -= (dy / d) * f * dt
-      b.vx += (dx / d) * f * dt; b.vy += (dy / d) * f * dt
-    }
-  }
-  // Springs on orch -> session edges.
-  for (const e of edges) {
-    const a = nodes.get(e.source), b = nodes.get(e.target)
-    if (!a || !b) continue
-    const dx = b.x - a.x, dy = b.y - a.y
-    const d = Math.hypot(dx, dy) || 1
-    const f = (d - 170) * 1.4
-    a.vx += (dx / d) * f * dt; a.vy += (dy / d) * f * dt
-    b.vx -= (dx / d) * f * dt; b.vy -= (dy / d) * f * dt
-  }
-  // Gravity toward centre + damping, then clamp inside the viewport.
-  for (const n of list) {
-    n.vx += (W / 2 - n.x) * 0.35 * dt
-    n.vy += (H / 2 - n.y) * 0.35 * dt
-    n.vx *= 0.86; n.vy *= 0.86
-    n.x += n.vx * dt * 60; n.y += n.vy * dt * 60
-    const r = radius(n) + 30
-    n.x = Math.min(W - r, Math.max(r, n.x))
-    n.y = Math.min(H - r, Math.max(r, n.y))
+    // Ease toward the computed slot. Layout is deterministic now, so this is
+    // presentation only — no simulation that could settle somewhere different.
+    const k = Math.min(1, dt * 12)
+    n.x += (n.tx - n.x) * k
+    n.y += (n.ty - n.y) * k
   }
 }
 
 function draw() {
   ctx.clearRect(0, 0, W, H)
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'left'
 
-  ctx.lineWidth = 1.5
-  for (const e of edges) {
-    const a = nodes.get(e.source), b = nodes.get(e.target)
-    if (!a || !b) continue
-    ctx.globalAlpha = Math.min(a.scale, b.scale) * 0.45
-    ctx.strokeStyle = b.state === 'working' ? COLOR.working : '#30363d'
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+  // Curved branches, parent -> each child. Control points are pulled along the
+  // axis of travel (horizontal for the tree, radially outward for the radial) so
+  // siblings separate near the parent instead of overlapping into one thick stem.
+  // #30363d at half alpha was very nearly the background — the fan out of a group
+  // read as a smudge. Lighter, thicker, and near-opaque; a branch to a working
+  // session is tinted so live work is traceable back to its directory.
+  // Branches stop at the dot's EDGE, not its centre. Running them to the centre
+  // was invisible while dots were opaque — the dot is drawn after and covered the
+  // stub — but the moment dot opacity started tracking idle time, the line showed
+  // straight through every dimmed dot.
+  ctx.lineWidth = Math.max(1, 1.6 * S)
+  for (const p of rows) {
+    if (!p.kids) continue
+    for (const c of p.kids) {
+      const rp = radius(p) + 2.5 * S, rc = radius(c) + 2.5 * S
+      ctx.globalAlpha = Math.min(c.scale, p.scale) * 0.9
+      ctx.strokeStyle = c.state === 'working' ? '#6e3b38' : '#525a63'
+      ctx.beginPath()
+      if (mode === 'radial') {
+        // Trim along the parent->child vector, which is the direction the curve
+        // leaves and arrives on in a radial layout.
+        const vx = c.x - p.x, vy = c.y - p.y
+        const d = Math.hypot(vx, vy) || 1
+        if (d <= rp + rc) continue
+        const sx = p.x + (vx / d) * rp, sy = p.y + (vy / d) * rp
+        const ex = c.x - (vx / d) * rc, ey = c.y - (vy / d) * rc
+        ctx.moveTo(sx, sy)
+        ctx.quadraticCurveTo((p.x + c.x) / 2, (p.y + c.y) / 2, ex, ey)
+      } else {
+        // The curve leaves and arrives horizontally here, so trim on x. Easing out
+        // of the parent horizontally is what makes siblings separate immediately
+        // instead of leaving as one thick stem.
+        const sx = p.x + rp, ex = c.x - rc
+        if (ex <= sx) continue
+        const dx = (ex - sx) * 0.55
+        ctx.moveTo(sx, p.y)
+        ctx.bezierCurveTo(sx + dx, p.y, ex - dx, c.y, ex, c.y)
+      }
+      ctx.stroke()
+    }
   }
 
-  for (const n of nodes.values()) {
+  for (const n of rows) {
     const r = radius(n)
     ctx.globalAlpha = n.scale
-    // A working node breathes so a busy graph reads as alive at a glance.
-    const pulse = n.state === 'working' ? 1 + 0.08 * Math.sin(performance.now() / 220) : 1
-    ctx.fillStyle = COLOR[n.state] || COLOR.unknown
-    ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse, 0, Math.PI * 2); ctx.fill()
+    const pulse = pulseOf(n, performance.now())
 
+    // In radial mode a label on the left half must run leftward, or it writes
+    // back across the diagram and collides with the opposite arc.
+    const flip = mode === 'radial' && Math.cos(n.angle ?? 0) < -0.1
+    ctx.textAlign = flip ? 'right' : 'left'
+    const dir = flip ? -1 : 1
+    const room = flip ? n.x - 12 : W - n.x - 12
+
+    if (n.kind === 'root') {
+      // Ring, not a filled dot, and the label sits to its LEFT — the origin then
+      // reads as the thing the tree hangs off rather than a first-column entry.
+      ctx.lineWidth = 1.5; ctx.strokeStyle = '#6e7681'
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.stroke()
+      ctx.fillStyle = '#6e7681'
+      ctx.font = `600 ${11 * S}px ui-monospace, Menlo, monospace`
+      ctx.textAlign = 'right'
+      ctx.fillText('CLAUDE', n.x - r - 10 * S, n.y)
+      ctx.textAlign = 'left'
+      n.hitW = 0
+      continue
+    }
+
+    if (n.kind === 'group') {
+      ctx.fillStyle = '#484f58'
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill()
+      ctx.fillStyle = '#8b949e'
+      ctx.font = `600 ${12 * S}px ui-monospace, Menlo, monospace`
+      const gx = n.x + dir * (r + 8 * S)
+      const gl = clip(n.label, room - r)
+      ctx.fillText(gl, gx, n.y)
+      n.hitW = ctx.measureText(gl).width + r + 8 * S
+      continue
+    }
+
+    // Only the DOT dims. Labels stay legible — a stale session still has to be
+    // readable — and a working one stays full strength regardless of its clock,
+    // since "how long it has been busy" is not staleness.
+    ctx.fillStyle = COLOR[n.state] || COLOR.unknown
+    ctx.globalAlpha = n.scale * (n.state === 'working' ? 1 : vitality(n))
+    ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse, 0, Math.PI * 2); ctx.fill()
+    ctx.globalAlpha = n.scale
     if (n.attached) {
-      ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 2
-      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + 4, 0, Math.PI * 2); ctx.stroke()
+      ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1.5
+      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + 3.5, 0, Math.PI * 2); ctx.stroke()
     }
     if (selected === n.id) {
-      ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 2
-      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + 9, 0, Math.PI * 2); ctx.stroke()
+      ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 1.5
+      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + 7, 0, Math.PI * 2); ctx.stroke()
     }
 
+    let tx = n.x + dir * (r + 10 * S)
+    // Reserve room for the age so a long title truncates instead of pushing it
+    // off the canvas — the age is the cheaper thing to keep, being fixed-width.
+    const age = n.age && n.age !== '-' ? n.age : ''
+    ctx.font = `${11 * S}px ui-monospace, Menlo, monospace`
+    const ageW = age ? ctx.measureText(age).width + 10 * S : 0
+
     ctx.fillStyle = '#e6edf3'
-    ctx.textAlign = 'center'
-    ctx.font = '600 12px -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif'
-    ctx.fillText(n.label || n.id, n.x, n.y + r + 16)
-    if (n.age && n.age !== '-') {
-      ctx.fillStyle = '#8b949e'
-      ctx.font = '11px ui-monospace, Menlo, monospace'
-      ctx.fillText(n.age, n.x, n.y + r + 30)
+    ctx.font = `600 ${12 * S}px -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif`
+    const label = clip(n.label || n.id, room - r - ageW)
+    ctx.fillText(label, tx, n.y)
+    tx += dir * (ctx.measureText(label).width + 10 * S)
+
+    if (age) {
+      ctx.fillStyle = '#6e7681'
+      ctx.font = `${11 * S}px ui-monospace, Menlo, monospace`
+      ctx.fillText(age, tx, n.y)
+      tx += dir * (ctx.measureText(age).width + 10 * S)
     }
+    n.hitW = Math.abs(tx - n.x)
+    n.hitDir = dir
   }
   ctx.globalAlpha = 1
 }
@@ -222,36 +692,69 @@ function frame(now) {
 const panel = document.getElementById('panel')
 document.getElementById('close').onclick = () => { selected = null; panel.classList.remove('open') }
 canvas.addEventListener('click', (ev) => {
-  const x = ev.clientX, y = ev.clientY
+  // Canvas coords are document-relative once the page can scroll, so offset the
+  // viewport-relative click by the canvas rect instead of using clientX/Y raw.
+  const rect = canvas.getBoundingClientRect()
+  const x = ev.clientX - rect.left, y = ev.clientY - rect.top
   let hit = null
-  for (const n of nodes.values()) if (Math.hypot(n.x - x, n.y - y) <= radius(n) + 6) hit = n
+  // Hit the whole row (dot + label + age), not just the dot — the dots are small
+  // now, and the label is what the eye is actually aiming at. Groups are layout
+  // scaffolding, not sessions, so they are not selectable.
+  for (const n of rows) {
+    if (n.kind === 'group' || n.kind === 'root') continue
+    // hitDir follows the label: on the radial's left half it extends leftward.
+    const d = n.hitDir || 1
+    const x0 = d > 0 ? n.x - 12 : n.x - (n.hitW || 0) - 6
+    const x1 = d > 0 ? n.x + (n.hitW || 0) + 6 : n.x + 12
+    if (Math.abs(n.y - y) <= rowH / 2 && x >= x0 && x <= x1) hit = n
+  }
   if (!hit) { selected = null; panel.classList.remove('open'); return }
   selected = hit.id
   document.getElementById('ptitle').textContent = hit.label || hit.id
-  const rows = [['session', hit.id], ['state', hit.state]]
-  if (hit.path) rows.push(['path', hit.path])
-  if (hit.age && hit.age !== '-') rows.push(['age', hit.age])
-  if (hit.attached) rows.push(['attached', 'yes'])
+  // NOT named `rows` — that shadows the module-level node list this same handler
+  // reads above, putting it in the temporal dead zone for the whole function and
+  // throwing before the hit test ever runs. The panel silently never opened.
+  const info = [['session', hit.id], ['state', hit.state]]
+  if (hit.path) info.push(['path', hit.path])
+  if (hit.age && hit.age !== '-') info.push(['age', hit.age])
+  if (hit.attached) info.push(['attached', 'yes'])
   if (hit.task) {
-    rows.push(['task', hit.task.id], ['status', hit.task.status], ['step', hit.task.step])
-    if (hit.task.target) rows.push(['worktree', hit.task.target])
+    info.push(['task', hit.task.id], ['status', hit.task.status], ['step', hit.task.step])
+    if (hit.task.target) info.push(['worktree', hit.task.target])
   }
   document.getElementById('pbody').innerHTML =
-    rows.map(([k, v]) => `<dt>${k}</dt><dd></dd>`).join('')
+    info.map(([k]) => `<dt>${k}</dt><dd></dd>`).join('')
   // Set text via textContent so a session title can never inject markup.
-  document.querySelectorAll('#pbody dd').forEach((dd, i) => { dd.textContent = rows[i][1] })
+  document.querySelectorAll('#pbody dd').forEach((dd, i) => { dd.textContent = info[i][1] })
   panel.classList.add('open')
+})
+
+const modeEl = document.getElementById('mode')
+function setMode(m) {
+  mode = m
+  try { localStorage.setItem('claude-graph-mode', m) } catch { /* private mode */ }
+  modeEl.innerHTML = m === 'tree' ? 'tree · press <b>r</b>' : 'radial · press <b>t</b>'
+  // Re-layout from the cached snapshot; nodes keep their positions and ease to
+  // the new ones, so switching reads as the tree rearranging rather than a cut.
+  if (lastSnap) apply(lastSnap)
+}
+window.addEventListener('keydown', (ev) => {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return
+  const k = ev.key.toLowerCase()
+  if (k === 't') setMode('tree')
+  else if (k === 'r') setMode('radial')
+  else if (k === ' ') { ev.preventDefault(); setMode(mode === 'tree' ? 'radial' : 'tree') }
 })
 
 const conn = document.getElementById('conn')
 function connect() {
   const es = new EventSource('/events')
   es.onopen = () => { conn.className = 'live'; conn.textContent = 'live' }
-  es.onmessage = (ev) => apply(JSON.parse(ev.data))
+  es.onmessage = (ev) => { lastSnap = JSON.parse(ev.data); apply(lastSnap) }
   es.onerror = () => { conn.className = 'down'; conn.textContent = 'reconnecting' }
 }
 
-resize(); connect(); requestAnimationFrame(frame)
+resize(); setMode(mode); connect(); requestAnimationFrame(frame)
 </script>
 </body>
 </html>
