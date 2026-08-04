@@ -36,6 +36,87 @@ const ANSI = /\x1b\[[0-9;]*m/g
 // picker.sh --list emits: rank \t session \t icon \t age \t paddedTitle \t path
 // We depend on that layout, so parse tolerantly — a format change should degrade
 // to state:"unknown", never throw and kill the poll loop.
+// ---- last typed prompt, read from the session transcript ---------------------
+//
+// A transcript is ~/.claude/projects/<slug>/<sessionId>.jsonl. Real prompts carry
+// promptSource "typed" | "queued" | "suggestion_accepted"; the far more numerous
+// tool-result entries have promptSource null and list (not string) content, and
+// subagent turns are isSidechain. Filtering on those three things is what
+// separates "what the user actually said" from the rest of the conversation.
+//
+// Transcripts reach tens of megabytes, so only the tail is read, and only when
+// the file's mtime has moved. The path lookup is cached too — finding it means
+// stat-ing one candidate per project directory.
+const PROMPT_SRC = new Set(['typed', 'queued', 'suggestion_accepted'])
+// Escalating windows. 256KB covers a session you have typed in recently, but a
+// long autonomous stretch buries the prompt under tool traffic — one measured at
+// 286KB back, just past a fixed 256KB window, which is exactly the silent miss
+// this avoids. The successful size is remembered per session so a busy transcript
+// does not re-escalate from scratch on every poll. 4MB is the giving-up point.
+const TAIL_STEPS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024]
+const PROMPT_MAX = 400
+const promptCache = new Map() // sessionId -> {file, mtimeMs, text, win}
+
+function findTranscript(sid) {
+  const base = path.join(process.env.HOME || '', '.claude', 'projects')
+  let dirs = []
+  try { dirs = fs.readdirSync(base) } catch { return null }
+  for (const d of dirs) {
+    const p = path.join(base, d, `${sid}.jsonl`)
+    try { if (fs.statSync(p).isFile()) return p } catch { /* next */ }
+  }
+  return null
+}
+
+function scanTail(file, size, bytes) {
+  const start = Math.max(0, size - bytes)
+  let buf
+  try {
+    const fd = fs.openSync(file, 'r')
+    buf = Buffer.alloc(size - start)
+    fs.readSync(fd, buf, 0, buf.length, start)
+    fs.closeSync(fd)
+  } catch { return null }
+
+  const lines = buf.toString('utf8').split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]
+    // The first line of a tail is usually a partial record; it fails the '{' check
+    // or the parse, which is the intent.
+    if (!l || l[0] !== '{') continue
+    let o
+    try { o = JSON.parse(l) } catch { continue }
+    if (o.type !== 'user' || o.isSidechain) continue
+    if (!PROMPT_SRC.has(o.promptSource)) continue
+    const t = o.message && o.message.content
+    if (typeof t !== 'string' || !t.trim()) continue
+    return t.trim().replace(/\s+/g, ' ').slice(0, PROMPT_MAX)
+  }
+  return null
+}
+
+function lastPrompt(sid) {
+  if (!sid) return null
+  let c = promptCache.get(sid)
+  if (!c) {
+    c = { file: findTranscript(sid), mtimeMs: 0, text: null, win: 0 }
+    promptCache.set(sid, c)
+  }
+  if (!c.file) return null
+  let st
+  try { st = fs.statSync(c.file) } catch { return c.text }
+  if (st.mtimeMs === c.mtimeMs) return c.text
+  c.mtimeMs = st.mtimeMs
+
+  for (const w of TAIL_STEPS) {
+    if (w < c.win) continue // start where this session needed to look last time
+    const text = scanTail(c.file, st.size, w)
+    if (text) { c.text = text; c.win = w; return text }
+    if (w >= st.size) break // whole file already scanned; nothing to find
+  }
+  return c.text
+}
+
 function parsePicker(out) {
   const rows = []
   for (const line of out.split('\n')) {
@@ -50,6 +131,7 @@ function parsePicker(out) {
       age: f[3].trim(),
       label: f[4].trim(),
       path: f[5].trim(),
+      sid: (f[6] || '').trim(),
     })
   }
   return rows
@@ -103,6 +185,7 @@ async function snapshot() {
     attached: attached.get(r.id) === true,
     kind: tasks.has(r.id) ? 'task' : 'free',
     task: tasks.get(r.id) || null,
+    prompt: lastPrompt(r.sid),
   }))
 
   const edges = []

@@ -102,21 +102,28 @@ emit_rows() {
     # derived one is tagged "nameSource":"derived". Prefer explicit names; else the
     # launcher's @claude_title (dir#N); else the dir basename. (pane_title avoided
     # — for an unnamed session it holds Claude's auto-summary, not a label.)
-    title=""; best_m=0
+    title=""; best_m=0; sid=""; sid_m=0
     for cp in $pids; do
       cf="$HOME/.claude/sessions/${cp}.json"
       [ -r "$cf" ] || continue
-      # One grep pulls BOTH "name" and "nameSource"; first occurrence of each wins.
-      src=""; cn=""
+      # One grep pulls "name", "nameSource" AND "sessionId"; first of each wins.
+      # Folded into the existing grep rather than run as a second pass — this loop
+      # is the hot path the fork-reduction work was about.
+      src=""; cn=""; csid=""
       while IFS= read -r kv; do
         case "$kv" in
-          '"nameSource"'*) [ -z "$src" ] && { src=${kv#*:}; src=${src//\"/}; src=${src# }; } ;;
-          '"name"'*)       [ -z "$cn"  ] && { cn=${kv#*:};  cn=${cn//\"/};  cn=${cn# }; } ;;
+          '"nameSource"'*) [ -z "$src" ]  && { src=${kv#*:};  src=${src//\"/};  src=${src# }; } ;;
+          '"sessionId"'*)  [ -z "$csid" ] && { csid=${kv#*:}; csid=${csid//\"/}; csid=${csid# }; } ;;
+          '"name"'*)       [ -z "$cn" ]   && { cn=${kv#*:};   cn=${cn//\"/};   cn=${cn# }; } ;;
         esac
-      done < <(LC_ALL=C /usr/bin/grep -oE '"name(Source)?"[[:space:]]*:[[:space:]]*"[^"]*"' "$cf" 2>/dev/null)
+      done < <(LC_ALL=C /usr/bin/grep -oE '"(name|nameSource|sessionId)"[[:space:]]*:[[:space:]]*"[^"]*"' "$cf" 2>/dev/null)
+      cm=$(stat -f %m "$cf" 2>/dev/null)
+      # sessionId tracks the freshest json REGARDLESS of nameSource — the transcript
+      # lookup needs it even for a session whose name was auto-derived, and those
+      # are skipped by the title rules below.
+      [ -n "$csid" ] && [ "${cm:-0}" -ge "$sid_m" ] && { sid_m="${cm:-0}"; sid="$csid"; }
       [ "$src" = "derived" ] && continue
       [ -z "$cn" ] && continue
-      cm=$(stat -f %m "$cf" 2>/dev/null)
       [ "${cm:-0}" -ge "$best_m" ] && { best_m="${cm:-0}"; title="$cn"; }
     done
     [ -z "$title" ] && title="$ctitle"
@@ -134,8 +141,10 @@ emit_rows() {
     # the longest name. Padded by pad_display, NOT printf's %-44s — that pads by
     # bytes and misaligns any CJK title. rank asc, then age asc (just-finished
     # floats to group top).
+    # Field 7 (sessionId) is for web-server.js to locate the transcript; fzf renders
+    # only fields 3..6, so it never shows up in the picker itself.
     pad_display "$title" 44
-    printf '%s\t%s\t%s\t%5s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "${path/#$HOME/~}"
+    printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "${path/#$HOME/~}" "$sid"
   done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n
 }
 

@@ -73,6 +73,12 @@
   aside dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; }
   aside dt { color: var(--dim); }
   aside dd { margin: 0; word-break: break-all; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  /* The prompt is prose, not an identifier: wrap on spaces (break-all would split
+     mid-word) and cap the height so a long one cannot grow the panel off-screen. */
+  aside dd.prompt {
+    word-break: normal; overflow-wrap: anywhere; color: var(--dim);
+    max-height: 7.5em; overflow-y: auto;
+  }
   aside button {
     position: absolute; top: 8px; right: 8px; background: none; border: 0;
     color: var(--dim); font-size: 16px; cursor: pointer; line-height: 1;
@@ -718,12 +724,13 @@ canvas.addEventListener('click', (ev) => {
   if (hit.path) info.push(['path', hit.path])
   if (hit.age && hit.age !== '-') info.push(['age', hit.age])
   if (hit.attached) info.push(['attached', 'yes'])
+  if (hit.prompt) info.push(['last prompt', hit.prompt])
   if (hit.task) {
     info.push(['task', hit.task.id], ['status', hit.task.status], ['step', hit.task.step])
     if (hit.task.target) info.push(['worktree', hit.task.target])
   }
   document.getElementById('pbody').innerHTML =
-    info.map(([k]) => `<dt>${k}</dt><dd></dd>`).join('')
+    info.map(([k]) => `<dt>${k}</dt><dd${k === 'last prompt' ? ' class="prompt"' : ''}></dd>`).join('')
   // Set text via textContent so a session title can never inject markup.
   document.querySelectorAll('#pbody dd').forEach((dd, i) => { dd.textContent = info[i][1] })
   panel.classList.add('open')
