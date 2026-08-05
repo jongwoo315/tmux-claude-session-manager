@@ -119,6 +119,126 @@ function lastPrompt(sid) {
   return c.text
 }
 
+// ---- fork lineage ------------------------------------------------------------
+//
+// `claude --fork-session` copies the parent's records into the child's transcript
+// verbatim, uuids and all, and stamps the first copied record with
+// `logicalParentUuid` pointing back into the parent. Two signals fall out of that,
+// and which one is available depends on whether the parent had been compacted:
+//
+//   A. shared head uuids — a fork of an uncompacted parent starts with the same
+//      records the parent starts with, so their heads share uuids. Two unrelated
+//      sessions share none, so a single hit is enough.
+//   B. logicalParentUuid — a fork of a compacted parent starts at the compact
+//      boundary instead, so the heads no longer line up, but the boundary record
+//      names the uuid it continues from.
+//
+// B also marks ordinary in-session compaction, so it only counts when the uuid
+// turns up in a *different* transcript. Both facts are fixed when the fork is
+// created and never change, so a resolved answer is cached for the process's life.
+//
+// Only same-directory transcripts are considered: a fork inherits its parent's
+// working directory (fork-new.sh passes -c "$path"), so a cross-directory match
+// would be a uuid collision, not lineage.
+const HEAD_BYTES = 64 * 1024
+const MAX_SCAN = 64 * 1024 * 1024 // giving-up point for the signal-B deep scan
+const forkCache = new Map() // sid -> origin sid | null (null = checked, not a fork)
+const headCache = new Map() // sid -> {uuids, logicalParent, file, dir, birth}
+
+function readHead(file) {
+  let buf, n
+  try {
+    const fd = fs.openSync(file, 'r')
+    buf = Buffer.alloc(HEAD_BYTES)
+    n = fs.readSync(fd, buf, 0, HEAD_BYTES, 0)
+    fs.closeSync(fd)
+  } catch {
+    return null
+  }
+  const lines = buf.subarray(0, n).toString('utf8').split('\n')
+  // A short file's last line is complete; a truncated read's is not.
+  if (n === HEAD_BYTES) lines.pop()
+
+  const uuids = new Set()
+  let logicalParent = null
+  for (const l of lines) {
+    if (!l || l[0] !== '{') continue
+    let o
+    try { o = JSON.parse(l) } catch { continue }
+    if (o.uuid) uuids.add(o.uuid)
+    if (!logicalParent && o.parentUuid === null && typeof o.logicalParentUuid === 'string') {
+      logicalParent = o.logicalParentUuid
+    }
+  }
+  return { uuids, logicalParent }
+}
+
+function headOf(sid) {
+  const hit = headCache.get(sid)
+  if (hit) return hit
+  const file = findTranscript(sid)
+  if (!file) return null // transcript not written yet — retry on the next poll
+  const parsed = readHead(file)
+  if (!parsed || !parsed.uuids.size) return null // still being written; don't cache
+  let birth = 0
+  try { birth = fs.statSync(file).birthtimeMs } catch { /* leave 0 */ }
+  const h = { ...parsed, file, dir: path.dirname(file), birth }
+  headCache.set(sid, h)
+  return h
+}
+
+// Which live session's transcript contains this uuid? Heads first, since that is
+// free; only then read whole files, which is why the answer gets cached.
+function ownerOf(uuid, self, heads) {
+  for (const [sid, h] of heads) {
+    if (h === self || h.dir !== self.dir) continue
+    if (h.uuids.has(uuid)) return sid
+  }
+  for (const [sid, h] of heads) {
+    if (h === self || h.dir !== self.dir) continue
+    try {
+      if (fs.statSync(h.file).size > MAX_SCAN) continue
+      if (fs.readFileSync(h.file, 'utf8').includes(uuid)) return sid
+    } catch { /* next */ }
+  }
+  return null
+}
+
+function linkForks(nodes) {
+  const heads = new Map()
+  for (const n of nodes) {
+    if (!n.sid) continue
+    const h = headOf(n.sid)
+    if (h) heads.set(n.sid, h)
+  }
+
+  for (const n of nodes) {
+    if (!n.sid) continue
+    if (forkCache.has(n.sid)) {
+      n.forkOf = forkCache.get(n.sid)
+      continue
+    }
+    const h = heads.get(n.sid)
+    if (!h) continue
+
+    let origin = null
+    for (const [sid, other] of heads) {
+      if (sid === n.sid || other.dir !== h.dir) continue
+      let shared = false
+      for (const u of h.uuids) {
+        if (other.uuids.has(u)) { shared = true; break }
+      }
+      // Whichever transcript was created second is the fork. On equal birth times
+      // the direction is unknowable, so no edge — better absent than backwards.
+      if (shared && h.birth > other.birth) { origin = sid; break }
+    }
+    if (!origin && h.logicalParent) origin = ownerOf(h.logicalParent, h, heads)
+
+    forkCache.set(n.sid, origin)
+    n.forkOf = origin
+  }
+}
+
 function parsePicker(out) {
   const rows = []
   for (const line of out.split('\n')) {
@@ -194,6 +314,14 @@ async function snapshot() {
     prompt: lastPrompt(r.sid),
   }))
 
+  linkForks(nodes)
+  // linkForks works in Claude session ids; the graph is keyed by tmux session name.
+  const bySid = new Map(nodes.filter((n) => n.sid).map((n) => [n.sid, n.id]))
+  for (const n of nodes) {
+    n.forkOf = (n.forkOf && bySid.get(n.forkOf)) || null
+    n.forkLabel = n.forkOf ? (nodes.find((p) => p.id === n.forkOf) || {}).label || '' : ''
+  }
+
   const edges = []
   if (nodes.some((n) => n.kind === 'task')) {
     nodes.push({
@@ -262,14 +390,20 @@ const handler = async (req, res) => {
   })
 }
 
-// Both loopback stacks, listed explicitly rather than binding 0.0.0.0.
-// Chrome resolves `localhost` to ::1 first on macOS, so an IPv4-only listener
-// shows a connection-refused error page even though curl -4 succeeds.
-for (const host of ['127.0.0.1', '::1']) {
-  const s = http.createServer(handler)
-  s.on('error', (e) => console.error(`listen ${host}: ${e.code}`))
-  s.listen(PORT, host)
+// Guarded so `require()`ing this file for a test does not bind a port or start
+// polling; only running it as a program does.
+if (require.main === module) {
+  // Both loopback stacks, listed explicitly rather than binding 0.0.0.0.
+  // Chrome resolves `localhost` to ::1 first on macOS, so an IPv4-only listener
+  // shows a connection-refused error page even though curl -4 succeeds.
+  for (const host of ['127.0.0.1', '::1']) {
+    const s = http.createServer(handler)
+    s.on('error', (e) => console.error(`listen ${host}: ${e.code}`))
+    s.listen(PORT, host)
+  }
+
+  console.log(`claude session graph → http://localhost:${PORT}  (poll ${POLL_MS}ms)`)
+  setInterval(tick, POLL_MS)
 }
 
-console.log(`claude session graph → http://localhost:${PORT}  (poll ${POLL_MS}ms)`)
-setInterval(tick, POLL_MS)
+module.exports = { linkForks, headOf, readHead, findTranscript }

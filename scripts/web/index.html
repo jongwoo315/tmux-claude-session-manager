@@ -10,6 +10,9 @@
     --fg: #e6edf3; --dim: #8b949e;
     --working: #f85149; --idle: #3fb950; --waiting: #d29922;
     --unknown: #8b949e; --dispatcher: #a371f7;
+    /* Cyan, not another purple: --dispatcher already owns purple for orch, and a
+       fork edge crossing an orch edge in the same hue reads as one relation. */
+    --fork: #39c5cf;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -102,7 +105,8 @@
       <span id="conn" class="down">connecting</span>
     </div>
     <p class="sub">Live tmux Claude sessions, branched by working directory.
-      Orch-dispatched sessions hang off <b>orch</b> instead of their directory.</p>
+      Orch-dispatched sessions hang off <b>orch</b> instead of their directory.
+      A dashed cyan link joins a fork to the session it came from.</p>
   </header>
   <canvas id="c"></canvas>
   <footer>
@@ -115,6 +119,10 @@
     A <b>throbbing</b> dot just handed back — working → idle or working → waiting —
     and fades over five minutes, or stops the moment you attach — a session with the
     white ring is already on your screen, so there is nothing left to flag.<br>
+    A <b style="color:var(--fork)">⑂</b> badge marks a session started with
+    <b>--fork-session</b>; the dashed link runs back to the conversation it branched
+    from, and hovering the row names it. Forks stay in their own directory group —
+    lineage is drawn on top of the structure, not in place of it.<br>
     Click a row to show its details in the panel.
   </footer>
 </div>
@@ -126,6 +134,10 @@ const COLOR = {
   working: '#f85149', idle: '#3fb950', waiting: '#d29922',
   unknown: '#8b949e', dispatcher: '#a371f7',
 }
+const FORK_COLOR = '#39c5cf' // keep in sync with --fork
+// U+2442 OCR FORK. Menlo has no glyph for it, so the stack falls through to Apple
+// Symbols; without that fallback the badge renders as tofu.
+const FORK_BADGE = '⑂'
 const FADE_MS = 700          // how long a dead node lingers while shrinking
 const canvas = document.getElementById('c')
 const ctx = canvas.getContext('2d')
@@ -641,6 +653,43 @@ function draw() {
     }
   }
 
+  // Fork lineage, drawn as a SECONDARY edge on top of the branch structure. A fork
+  // keeps its own directory group — re-parenting it under its origin would move it
+  // out of the directory the tree claims to be grouped by — so lineage is an
+  // annotation, and it is dashed and thinner to say so.
+  //
+  // It bows LEFT in tree mode, into the gutter the branches already occupy, because
+  // the space to the RIGHT of a dot is where its label lives and a curve through
+  // the text is unreadable. In radial mode both ends sit on the outer ring, so the
+  // chord is pulled toward the root instead of cutting straight across the labels.
+  const rootNode = rows.find((n) => n.kind === 'root')
+  ctx.setLineDash([4 * S, 4 * S])
+  ctx.lineWidth = Math.max(1, 1.1 * S)
+  ctx.strokeStyle = FORK_COLOR
+  for (const c of rows) {
+    if (!c.forkOf) continue
+    const p = nodes.get(c.forkOf)
+    if (!p || p.dead) continue
+    ctx.globalAlpha = Math.min(c.scale, p.scale) * 0.8
+    ctx.beginPath()
+    if (mode === 'radial') {
+      const mx = (p.x + c.x) / 2, my = (p.y + c.y) / 2
+      const kx = rootNode ? (mx + rootNode.x) / 2 : mx
+      const ky = rootNode ? (my + rootNode.y) / 2 : my
+      ctx.moveTo(p.x, p.y)
+      ctx.quadraticCurveTo(kx, ky, c.x, c.y)
+    } else {
+      const rp = radius(p) + 2.5 * S, rc = radius(c) + 2.5 * S
+      // Bow scales with the vertical gap, so a link spanning the whole tree clears
+      // the branch fan instead of hugging it.
+      const bow = Math.min(110 * S, 24 * S + Math.abs(c.y - p.y) * 0.2)
+      ctx.moveTo(p.x - rp, p.y)
+      ctx.bezierCurveTo(p.x - bow, p.y, c.x - bow, c.y, c.x - rc, c.y)
+    }
+    ctx.stroke()
+  }
+  ctx.setLineDash([])
+
   for (const n of rows) {
     const r = radius(n)
     ctx.globalAlpha = n.scale
@@ -714,6 +763,15 @@ function draw() {
       ctx.fillText(age, tx, n.y)
       tx += dir * (ctx.measureText(age).width + 10 * S)
     }
+
+    // Fork badge. Sits after the age so it never competes with the title for the
+    // width budget — by here the label has already been clipped to fit.
+    if (n.forkOf) {
+      ctx.fillStyle = FORK_COLOR
+      ctx.font = `${12 * S}px "Apple Symbols", ui-monospace, Menlo, monospace`
+      ctx.fillText(FORK_BADGE, tx, n.y)
+      tx += dir * (ctx.measureText(FORK_BADGE).width + 8 * S)
+    }
     n.hitW = Math.abs(tx - n.x)
     n.hitDir = dir
   }
@@ -730,15 +788,16 @@ function frame(now) {
 
 const panel = document.getElementById('panel')
 document.getElementById('close').onclick = () => { selected = null; panel.classList.remove('open') }
-canvas.addEventListener('click', (ev) => {
-  // Canvas coords are document-relative once the page can scroll, so offset the
-  // viewport-relative click by the canvas rect instead of using clientX/Y raw.
+// Canvas coords are document-relative once the page can scroll, so offset the
+// viewport-relative pointer by the canvas rect instead of using clientX/Y raw.
+//
+// Hit the whole row (dot + label + age), not just the dot — the dots are small
+// now, and the label is what the eye is actually aiming at. Groups are layout
+// scaffolding, not sessions, so they are not selectable.
+function hitAt(ev) {
   const rect = canvas.getBoundingClientRect()
   const x = ev.clientX - rect.left, y = ev.clientY - rect.top
   let hit = null
-  // Hit the whole row (dot + label + age), not just the dot — the dots are small
-  // now, and the label is what the eye is actually aiming at. Groups are layout
-  // scaffolding, not sessions, so they are not selectable.
   for (const n of rows) {
     if (n.kind === 'group' || n.kind === 'root') continue
     // hitDir follows the label: on the radial's left half it extends leftward.
@@ -747,6 +806,19 @@ canvas.addEventListener('click', (ev) => {
     const x1 = d > 0 ? n.x + (n.hitW || 0) + 6 : n.x + 12
     if (Math.abs(n.y - y) <= rowH / 2 && x >= x0 && x <= x1) hit = n
   }
+  return hit
+}
+
+// Native title tooltip rather than a drawn one: the badge is the affordance, and
+// the origin's name is the only thing hovering needs to answer.
+canvas.addEventListener('mousemove', (ev) => {
+  const n = hitAt(ev)
+  const t = n && n.forkOf ? `forked from ${n.forkLabel || n.forkOf}` : ''
+  if (canvas.title !== t) canvas.title = t
+})
+
+canvas.addEventListener('click', (ev) => {
+  const hit = hitAt(ev)
   if (!hit) { selected = null; panel.classList.remove('open'); return }
   selected = hit.id
   document.getElementById('ptitle').textContent = hit.label || hit.id
@@ -757,6 +829,7 @@ canvas.addEventListener('click', (ev) => {
   if (hit.path) info.push(['path', hit.path])
   if (hit.age && hit.age !== '-') info.push(['age', hit.age])
   if (hit.attached) info.push(['attached', 'yes'])
+  if (hit.forkOf) info.push(['forked from', hit.forkLabel || hit.forkOf])
   if (hit.prompt) info.push(['last prompt', hit.prompt])
   if (hit.task) {
     info.push(['task', hit.task.id], ['status', hit.task.status], ['step', hit.task.step])
