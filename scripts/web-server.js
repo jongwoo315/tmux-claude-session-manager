@@ -140,24 +140,31 @@ function lastPrompt(sid) {
 // Only same-directory transcripts are considered: a fork inherits its parent's
 // working directory (fork-new.sh passes -c "$path"), so a cross-directory match
 // would be a uuid collision, not lineage.
-const HEAD_BYTES = 64 * 1024
-const MAX_SCAN = 64 * 1024 * 1024 // giving-up point for the signal-B deep scan
+// Escalating head windows. A transcript does not open with conversation: it opens
+// with metadata (custom-title, agent-name, mode, permission-mode) followed by a run
+// of file-history-snapshot records that carry whole file contents. None of those
+// have a uuid, and they are large — measured, one fork's first uuid-bearing record
+// sat at 102,848 bytes while another's sat at 52,062. A fixed 64KB window resolved
+// the second and silently missed the first, which is the failure this replaces.
+// Stops at the first window that yields a uuid, so the common case still reads 64KB.
+const HEAD_STEPS = [64 * 1024, 512 * 1024, 4 * 1024 * 1024]
+const SCAN_CHUNK = 4 * 1024 * 1024 // deep-scan window; see fileHasUuid
 const forkCache = new Map() // sid -> origin sid | null (null = checked, not a fork)
 const headCache = new Map() // sid -> {uuids, logicalParent, file, dir, birth}
 
-function readHead(file) {
+function readHead(file, bytes) {
   let buf, n
   try {
     const fd = fs.openSync(file, 'r')
-    buf = Buffer.alloc(HEAD_BYTES)
-    n = fs.readSync(fd, buf, 0, HEAD_BYTES, 0)
+    buf = Buffer.alloc(bytes)
+    n = fs.readSync(fd, buf, 0, bytes, 0)
     fs.closeSync(fd)
   } catch {
     return null
   }
   const lines = buf.subarray(0, n).toString('utf8').split('\n')
   // A short file's last line is complete; a truncated read's is not.
-  if (n === HEAD_BYTES) lines.pop()
+  if (n === bytes) lines.pop()
 
   const uuids = new Set()
   let logicalParent = null
@@ -178,7 +185,14 @@ function headOf(sid) {
   if (hit) return hit
   const file = findTranscript(sid)
   if (!file) return null // transcript not written yet — retry on the next poll
-  const parsed = readHead(file)
+  let size = 0
+  try { size = fs.statSync(file).size } catch { /* treat as unknown */ }
+  let parsed = null
+  for (const w of HEAD_STEPS) {
+    parsed = readHead(file, w)
+    if (parsed && parsed.uuids.size) break
+    if (size && w >= size) break // whole file already read; there is nothing more
+  }
   if (!parsed || !parsed.uuids.size) return null // still being written; don't cache
   let birth = 0
   try { birth = fs.statSync(file).birthtimeMs } catch { /* leave 0 */ }
@@ -187,8 +201,39 @@ function headOf(sid) {
   return h
 }
 
+// Substring search over a file of any size, in bounded memory.
+//
+// Replaces a readFileSync(...).includes() guarded by a 64MB cap. The cap was doing
+// the opposite of protecting: a long-lived parent transcript measured 75MB, so the
+// scan was skipped and the fork it was the origin of never got its edge — a silent
+// miss, indistinguishable from "not a fork". Chunking means no cap is needed.
+//
+// Consecutive chunks overlap by uuid.length-1 so a uuid straddling a boundary is
+// still found; without it the match would be split across two reads and lost.
+function fileHasUuid(file, uuid) {
+  const need = Buffer.from(uuid)
+  const overlap = need.length - 1
+  const buf = Buffer.alloc(SCAN_CHUNK)
+  let fd
+  try {
+    fd = fs.openSync(file, 'r')
+    let pos = 0
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, SCAN_CHUNK, pos)
+      if (n <= 0) return false
+      if (buf.subarray(0, n).includes(need)) return true
+      if (n < SCAN_CHUNK) return false
+      pos += n - overlap
+    }
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd) } catch { /* already gone */ }
+  }
+}
+
 // Which live session's transcript contains this uuid? Heads first, since that is
-// free; only then read whole files, which is why the answer gets cached.
+// free; only then scan whole files, which is why the answer gets cached.
 function ownerOf(uuid, self, heads) {
   for (const [sid, h] of heads) {
     if (h === self || h.dir !== self.dir) continue
@@ -196,10 +241,7 @@ function ownerOf(uuid, self, heads) {
   }
   for (const [sid, h] of heads) {
     if (h === self || h.dir !== self.dir) continue
-    try {
-      if (fs.statSync(h.file).size > MAX_SCAN) continue
-      if (fs.readFileSync(h.file, 'utf8').includes(uuid)) return sid
-    } catch { /* next */ }
+    if (fileHasUuid(h.file, uuid)) return sid
   }
   return null
 }
