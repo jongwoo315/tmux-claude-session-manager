@@ -153,6 +153,42 @@ emit_rows() {
   exit 0
 }
 
+# Pane contents with trailing blank rows removed.
+#
+# Claude Code does not repaint the rows its slash-command popup occupied when the
+# "/" is backspaced away, so the pane really does end in a block of blank lines.
+# The preview window is opened with `follow`, which parks at the BOTTOM of the
+# capture — straight onto that blank block, with the actual output scrolled out of
+# view. Trimming moves the tail back into frame.
+#
+# Blankness is tested after stripping ANSI: `-e` keeps escape sequences, and a row
+# holding nothing but a reset sequence has NF>0, so a naive /^[[:space:]]*$/ would
+# call it content and trim nothing. Only the COPY used for the test is stripped —
+# what gets printed keeps its colors.
+# -S -200 pulls scrollback in ahead of the visible screen. Trimming alone left the
+# lower half of the preview box empty: the pane is ~80 rows but Claude Code parks
+# its statusline around row 44, so the capture was SHORTER than the preview window
+# and `follow` had nothing to scroll. With history the document overflows the box,
+# so follow pins the newest line to the bottom edge and fills the rest with what
+# came before — recent conversation instead of dead space.
+preview_pane() {
+  [ -n "${1:-}" ] || return 0
+  tmux capture-pane -ept "$1" -S -200 2>/dev/null | awk '
+    BEGIN { esc = sprintf("%c", 27) }
+    {
+      a[NR] = $0
+      t = $0
+      gsub(esc "\\[[0-9;?]*[a-zA-Z]", "", t)
+      if (t ~ /[^[:space:]]/) last = NR
+    }
+    END { for (i = 1; i <= last; i++) print a[i] }'
+}
+
+[ "${1:-}" = '--preview' ] && {
+  preview_pane "${2:-}"
+  exit 0
+}
+
 if ! command -v fzf >/dev/null 2>&1; then
   tmux display-message "tmux-claude-session-manager: fzf is required for the picker"
   exit 0
@@ -177,7 +213,7 @@ trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
-  --preview="tmux capture-pane -ept {2}" --preview-window='up,70%,follow' \
+  --preview="$self --preview {2}" --preview-window='up,70%,follow' \
 	--bind="load:reload-sync(sleep 2; $self --list)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
   ${extra_opts[@]+"${extra_opts[@]}"})
