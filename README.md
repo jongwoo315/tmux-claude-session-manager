@@ -63,7 +63,23 @@ run-shell ~/clone/path/claude_session_manager.tmux
 | Key            | Action                                                                          |
 | -------------- | ------------------------------------------------------------------------------- |
 | `prefix` + `y` | Launch (or re-attach to) a Claude session for the current directory, in a popup |
+| `prefix` + `Y` | Launch a **new** session for the current directory, alongside any existing one  |
+| `prefix` + `R` | Resume a past conversation in a new picker-tracked session                      |
+| `prefix` + `F` | Fork a past conversation into a new session (fresh ID, original untouched)      |
 | `prefix` + `u` | Open the session picker                                                         |
+| `prefix` + `b` | Jump straight back to the last attached session, skipping the picker            |
+
+`Y`, `R` and `F` all create a session named `claude-<hash>[-N]`, so every one of
+them shows up in the picker. They differ only in what Claude is told to do on
+attach: start clean, resume in place, or fork.
+
+`R` and `F` run `claude --resume` with no session ID, so Claude's own transcript
+picker opens on first attach and you choose the conversation there.
+
+> **Note:** `Y`, `R` and `F` refuse to run from inside a `claude-*` session —
+> sessions attach as popups, and popups cannot nest. Press `prefix` + `u` first
+> (which closes the popup and reopens the picker on the outer client), or detach,
+> then launch.
 
 Inside the picker:
 
@@ -222,12 +238,23 @@ Set any of these before the plugin loads (defaults shown):
 
 ```tmux
 set -g @claude_launch_key     'y'        # prefix key: launch/open for current dir
+set -g @claude_new_key        'Y'        # prefix key: launch an additional session
+set -g @claude_resume_key     'R'        # prefix key: resume a past conversation
+set -g @claude_fork_key       'F'        # prefix key: fork a past conversation
 set -g @claude_list_key       'u'        # prefix key: open the picker
+set -g @claude_last_key       'b'        # prefix key: jump back to last session
 set -g @claude_command        'claude'   # command run in new sessions
 set -g @claude_args           ''         # extra args appended to the command
 set -g @claude_session_prefix 'claude-'  # tmux session name prefix
 set -g @claude_popup_width     '90%'     # popup width
 set -g @claude_popup_height    '90%'     # popup height
+
+# Full command lines for the resume and fork keys. Unlike @claude_command these
+# are used verbatim, so @claude_args is not appended — put every flag here.
+set -g @claude_resume_command 'claude --resume --dangerously-skip-permissions'
+set -g @claude_fork_command   'claude --resume --fork-session --dangerously-skip-permissions'
+
+set -g @claude_fzf_options    ''         # extra flags passed to fzf in the picker
 ```
 
 For example, to skip permission prompts in launched sessions:
@@ -241,6 +268,10 @@ set -g @claude_args '--dangerously-skip-permissions'
 - The **launcher** creates a detached `claude-<hash-of-dir>` tmux session running
   `claude`, records the window it came from in `@claude_origin`, and attaches to
   it in a popup.
+- The **new / resume / fork** keys take the same path, appending `-2`, `-3` … to
+  the name when that directory already has a session. Each sets a default
+  `@claude_title` (`<dir>#N`, `<dir>#N~resume`, `<dir>#N~fork`) so same-directory
+  sessions stay distinguishable in the picker; `/rename` in-session overrides it.
 - The **hooks** set `@claude_state` / `@claude_state_at` on each session as Claude
   works.
 - The **picker** lists sessions matching the prefix, reads their state and a live
