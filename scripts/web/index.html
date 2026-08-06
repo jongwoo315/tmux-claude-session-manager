@@ -99,13 +99,13 @@
         <span><i class="dot" style="background:var(--idle)"></i>idle</span>
         <span><i class="dot" style="background:var(--waiting)"></i>waiting</span>
         <span><i class="dot" style="background:var(--unknown)"></i>dormant</span>
-        <span><i class="dot" style="background:var(--dispatcher)"></i>orphaned</span>
+        <span><i class="dot" style="background:var(--dispatcher)"></i>orch task</span>
       </span>
       <span id="mode" class="mode">tree · press <b>r</b></span>
       <span id="conn" class="down">connecting</span>
     </div>
     <p class="sub">Live tmux Claude sessions, branched by working directory.
-      Orch-dispatched sessions hang off <b>orch</b> instead of their directory.
+      An orch task hangs off the session that dispatched it, not its directory.
       A dashed cyan link joins a fork to the session it came from.</p>
   </header>
   <canvas id="c"></canvas>
@@ -119,6 +119,10 @@
     A <b>throbbing</b> dot just handed back — working → idle or working → waiting —
     and fades over five minutes, or stops the moment you attach — a session with the
     white ring is already on your screen, so there is nothing left to flag.<br>
+    An <b style="color:var(--dispatcher)">orch task</b> has a purple core ringed in
+    its own state color — the ring answers "does it want me", the core answers "who
+    started it". Purple is not a state. A lone purple node labelled <b>orch</b> is a
+    bucket that appears only when a task outlives the session that dispatched it.<br>
     A <b style="color:var(--fork)">⑂</b> badge marks a session started with
     <b>--fork-session</b>; the dashed link runs back to the conversation it branched
     from, and hovering the row names it. Forks stay in their own directory group —
@@ -139,6 +143,30 @@ const FORK_COLOR = '#39c5cf' // keep in sync with --fork
 // Symbols; without that fallback the badge renders as tofu.
 const FORK_BADGE = '⑂'
 const FADE_MS = 700          // how long a dead node lingers while shrinking
+
+// How an orch task's state ring sits relative to the radius r an ordinary dot
+// would have. All three were built and looked at; `straddle` won, the other two are
+// kept because the choice is a judgement call, not a correctness one — switch by
+// changing ORCH_STYLE, nothing else.
+//
+//   ringAt  where the stroke is CENTRED (stroke spans ringAt ± rim/2)
+//   gap     background between the purple core and the inner edge of the ring
+//
+//                  purple core   outer edge   verdict
+//   outside        7.5 (100%)    9.5 (+27%)   ring wholly outside r; too big next
+//                                             to its neighbours
+//   inside         3.5 ( 47%)    7.5 (  =  )  ring wholly inside r; footprint
+//                                             matches exactly but the purple is a
+//                                             speck
+//   straddle       5.0 ( 67%)    8.5 (+13%)   half in, half out — pays a little of
+//                                             each cost instead of all of one
+//   (figures at S = 1.25, where r = 7.5px)
+const ORCH_STYLES = {
+  outside:  { rim: 2, gap: 0,   ringAt: (rr, rim) => rr + rim / 2 },
+  inside:   { rim: 2, gap: 2,   ringAt: (rr, rim) => rr - rim / 2 },
+  straddle: { rim: 2, gap: 1.5, ringAt: (rr) => rr },
+}
+const ORCH_STYLE = 'straddle'
 const canvas = document.getElementById('c')
 const ctx = canvas.getContext('2d')
 // H is the CANVAS height, which may exceed VH (the viewport) when the tree is
@@ -731,17 +759,42 @@ function draw() {
     // Only the DOT dims. Labels stay legible — a stale session still has to be
     // readable — and a working one stays full strength regardless of its clock,
     // since "how long it has been busy" is not staleness.
-    ctx.fillStyle = COLOR[n.state] || COLOR.unknown
+    // An orch task carries TWO facts — who started it, and whether it wants you —
+    // so it gets both: a purple core for "dispatched by orch", ringed in its state
+    // color. Painting it state-colored like everything else (what it did before)
+    // made orch work indistinguishable from a session you opened by hand; painting
+    // it flat purple would have hidden the state instead, which is the fact you
+    // actually scan for.
+    //
+    // An orch task carries two facts — who started it, and whether it wants you —
+    // so it gets a purple core (dispatched by orch) ringed in its state color. See
+    // ORCH_STYLES for how the ring is placed and why.
+    const stateColor = COLOR[n.state] || COLOR.unknown
+    const orch = n.kind === 'task'
+    const { rim, gap, ringAt } = ORCH_STYLES[ORCH_STYLE]
+    const ring = ringAt(r * pulse, rim)
+    // Outboard rings clear whatever part of the rim pokes past r.
+    const deco = orch ? Math.max(0, ring + rim / 2 - r * pulse) : 0
     ctx.globalAlpha = n.scale * (n.state === 'working' ? 1 : vitality(n))
-    ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse, 0, Math.PI * 2); ctx.fill()
+    ctx.fillStyle = orch ? COLOR.dispatcher : stateColor
+    // Clamped: a node animates in at scale 0.1, so r starts near 0.75px and the
+    // inset would go NEGATIVE. ctx.arc() throws IndexSizeError on a negative radius,
+    // which aborts draw() for every node after it — the canvas stays blank for as
+    // long as one node is still growing.
+    const core = Math.max(0.5, orch ? ring - rim / 2 - gap : r * pulse)
+    ctx.beginPath(); ctx.arc(n.x, n.y, core, 0, Math.PI * 2); ctx.fill()
+    if (orch) {
+      ctx.strokeStyle = stateColor; ctx.lineWidth = rim
+      ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(0.5, ring), 0, Math.PI * 2); ctx.stroke()
+    }
     ctx.globalAlpha = n.scale
     if (n.attached) {
       ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1.5
-      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + 3.5, 0, Math.PI * 2); ctx.stroke()
+      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + deco + 3.5, 0, Math.PI * 2); ctx.stroke()
     }
     if (selected === n.id) {
       ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 1.5
-      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + 7, 0, Math.PI * 2); ctx.stroke()
+      ctx.beginPath(); ctx.arc(n.x, n.y, r * pulse + deco + 7, 0, Math.PI * 2); ctx.stroke()
     }
 
     let tx = n.x + dir * (r + 10 * S)
