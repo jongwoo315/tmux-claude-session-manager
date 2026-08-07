@@ -168,6 +168,7 @@ function readHead(file, bytes) {
 
   const uuids = new Set()
   let logicalParent = null
+  let startedAt = 0
   for (const l of lines) {
     if (!l || l[0] !== '{') continue
     let o
@@ -176,8 +177,13 @@ function readHead(file, bytes) {
     if (!logicalParent && o.parentUuid === null && typeof o.logicalParentUuid === 'string') {
       logicalParent = o.logicalParentUuid
     }
+    // Earliest timestamp carried by the conversation itself — see headOf.
+    if (!startedAt && o.timestamp) {
+      const t = Date.parse(o.timestamp)
+      if (t) startedAt = t
+    }
   }
-  return { uuids, logicalParent }
+  return { uuids, logicalParent, startedAt }
 }
 
 function headOf(sid) {
@@ -194,8 +200,16 @@ function headOf(sid) {
     if (size && w >= size) break // whole file already read; there is nothing more
   }
   if (!parsed || !parsed.uuids.size) return null // still being written; don't cache
-  let birth = 0
-  try { birth = fs.statSync(file).birthtimeMs } catch { /* leave 0 */ }
+  // Which of two sessions is the fork comes down to which STARTED later, so the
+  // ordering signal must not move. The file's birthtimeMs does move: resuming a
+  // session rewrites its transcript, and a resume reset one session's birthtime to
+  // four hours AFTER the fork it was the origin of — inverting the arrow, so the
+  // 17-day-old parent was drawn as a fork of its own child. The first timestamp
+  // INSIDE the transcript is fixed when the conversation starts and survives
+  // resume, copy and rsync. birthtimeMs stays only as a fallback for a head with
+  // no timestamped record yet.
+  let birth = parsed.startedAt
+  if (!birth) { try { birth = fs.statSync(file).birthtimeMs } catch { birth = 0 } }
   const h = { ...parsed, file, dir: path.dirname(file), birth }
   headCache.set(sid, h)
   return h
@@ -235,13 +249,18 @@ function fileHasUuid(file, uuid) {
 // Which live session's transcript contains this uuid? Heads first, since that is
 // free; only then scan whole files, which is why the answer gets cached.
 function ownerOf(uuid, self, heads) {
+  // A fork cannot predate its origin, so only sessions that STARTED EARLIER are
+  // candidates. Without this the arrow can point either way — and did: resuming a
+  // session put a compaction-boundary record (which carries logicalParentUuid) at
+  // the head of its transcript, and its own fork holds verbatim COPIES of its
+  // records, so the uuid was found there and the parent was declared a fork of its
+  // child. Both directions then resolved at once, drawing a two-node cycle.
+  const older = (h) => h !== self && h.dir === self.dir && h.birth && h.birth < self.birth
   for (const [sid, h] of heads) {
-    if (h === self || h.dir !== self.dir) continue
-    if (h.uuids.has(uuid)) return sid
+    if (older(h) && h.uuids.has(uuid)) return sid
   }
   for (const [sid, h] of heads) {
-    if (h === self || h.dir !== self.dir) continue
-    if (fileHasUuid(h.file, uuid)) return sid
+    if (older(h) && fileHasUuid(h.file, uuid)) return sid
   }
   return null
 }
