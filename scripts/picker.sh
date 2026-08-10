@@ -220,13 +220,23 @@ trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 
 # `load` fires after every list load, so binding reload to it makes a self-feeding
 # 2-second refresh — measured at exactly 2s intervals for as long as the picker is
-# open. That is intended (states must stay live), but it MUST be async: `reload-sync`
-# holds fzf until the command returns, and the command opens with `sleep 2`, so the
-# UI was blocked essentially the whole cycle and j/k input piled up behind it.
+# open. That is intended (states must stay live), but BOTH details below are load-
+# bearing and each was wrong at some point:
+#
+#   async `reload`, not `reload-sync` — sync holds fzf until the command returns,
+#   so the UI froze for the whole cycle and j/k piled up behind it.
+#
+#   `--list; sleep 2`, NOT `sleep 2; --list` — reload empties the list immediately
+#   and waits for output, so a leading sleep left the picker filtering an EMPTY
+#   list for 2 of every 2.2 seconds. Measured: typing a query took 1697ms to show
+#   results, against 133ms with no reload at all. Emitting first and sleeping
+#   afterwards keeps the rows on screen the whole time and the delay between
+#   refreshes unchanged — 127ms, i.e. the no-reload baseline, with 0 empty frames
+#   sampled over 6 seconds.
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
   --preview="$self --preview {2}" --preview-window='up,70%,follow' \
-	--bind="load:reload(sleep 2; $self --list)" \
+	--bind="load:reload($self --list; sleep 2)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
   ${extra_opts[@]+"${extra_opts[@]}"})
 
