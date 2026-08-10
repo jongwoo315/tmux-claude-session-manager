@@ -6,6 +6,41 @@
 #   picker.sh --list    print the rows only (used by fzf's ctrl-x reload).
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --preview is dispatched FIRST, before sourcing helpers and before reading any
+# tmux option. fzf re-runs it on every j/k, so anything above it is paid per
+# keystroke: the @claude_session_prefix lookup alone measured 10.4ms of a 25.9ms
+# preview — 40% spent on a value the preview never reads. preview_pane needs only
+# tmux and awk.
+preview_pane() {
+  [ -n "${1:-}" ] || return 0
+  # Only as many lines as the preview window can show. fzf exports its geometry to
+  # the preview command; without the cap this emitted 280 lines / 26KB into a ~51
+  # row window on EVERY keystroke, and at key-repeat speed that is the better part
+  # of a megabyte per second pushed through a tmux popup — which is what the j/k
+  # "lag" actually was. Scrollback still comes in (-S) so the window stays full
+  # even when the pane itself is mostly blank; it is just trimmed to fit.
+  local want=$(( ${FZF_PREVIEW_LINES:-60} + 2 ))
+  tmux capture-pane -ept "$1" -S -200 2>/dev/null | awk -v want="$want" '
+    BEGIN { esc = sprintf("%c", 27) }
+    {
+      a[NR] = $0
+      t = $0
+      gsub(esc "\\[[0-9;?]*[a-zA-Z]", "", t)
+      if (t ~ /[^[:space:]]/) last = NR
+    }
+    END {
+      start = last - want + 1
+      if (start < 1) start = 1
+      for (i = start; i <= last; i++) print a[i]
+    }'
+}
+
+[ "${1:-}" = '--preview' ] && {
+  preview_pane "${2:-}"
+  exit 0
+}
+
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
 
@@ -158,42 +193,6 @@ emit_rows() {
 
 [ "${1:-}" = '--list' ] && {
   emit_rows
-  exit 0
-}
-
-# Pane contents with trailing blank rows removed.
-#
-# Claude Code does not repaint the rows its slash-command popup occupied when the
-# "/" is backspaced away, so the pane really does end in a block of blank lines.
-# The preview window is opened with `follow`, which parks at the BOTTOM of the
-# capture — straight onto that blank block, with the actual output scrolled out of
-# view. Trimming moves the tail back into frame.
-#
-# Blankness is tested after stripping ANSI: `-e` keeps escape sequences, and a row
-# holding nothing but a reset sequence has NF>0, so a naive /^[[:space:]]*$/ would
-# call it content and trim nothing. Only the COPY used for the test is stripped —
-# what gets printed keeps its colors.
-# -S -200 pulls scrollback in ahead of the visible screen. Trimming alone left the
-# lower half of the preview box empty: the pane is ~80 rows but Claude Code parks
-# its statusline around row 44, so the capture was SHORTER than the preview window
-# and `follow` had nothing to scroll. With history the document overflows the box,
-# so follow pins the newest line to the bottom edge and fills the rest with what
-# came before — recent conversation instead of dead space.
-preview_pane() {
-  [ -n "${1:-}" ] || return 0
-  tmux capture-pane -ept "$1" -S -200 2>/dev/null | awk '
-    BEGIN { esc = sprintf("%c", 27) }
-    {
-      a[NR] = $0
-      t = $0
-      gsub(esc "\\[[0-9;?]*[a-zA-Z]", "", t)
-      if (t ~ /[^[:space:]]/) last = NR
-    }
-    END { for (i = 1; i <= last; i++) print a[i] }'
-}
-
-[ "${1:-}" = '--preview' ] && {
-  preview_pane "${2:-}"
   exit 0
 }
 
