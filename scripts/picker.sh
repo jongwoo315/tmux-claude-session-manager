@@ -92,7 +92,15 @@ emit_rows() {
     # rides along in the list-sessions call above, so this costs nothing — no
     # capture, no sampling delay. Display-only: @claude_state is left alone so
     # orch keeps reading the same value it always did.
-    [ "$state" = working ] && [ -n "$wact" ] && [ $((now - wact)) -gt 5 ] && state=idle
+    #
+    # 30s, not 5s. A session waiting on a background shell or agent repaints only
+    # when its elapsed-time line ticks, so it crossed a 5-second line constantly and
+    # flapped working<->idle every couple of seconds. The picker re-sorts on state,
+    # so each flap threw that row between the top and bottom of the list, and j/k
+    # landed on whatever slid underneath — read as input lag, not as reordering.
+    # The gap this discriminates is enormous (0s vs 575s+), so 30s costs nothing in
+    # detection: an ESC-interrupted session is stale by minutes, never by seconds.
+    [ "$state" = working ] && [ -n "$wact" ] && [ $((now - wact)) -gt 30 ] && state=idle
     pids=""
     while IFS= read -r line; do
       [ "${line%% *}" = "$pid" ] && { pids=${line#* }; break; }
@@ -211,10 +219,15 @@ fzf_options="$(get_tmux_option @claude_fzf_options '')"
 printf '\033[5 q' >/dev/tty 2>/dev/null || true
 trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 
+# `load` fires after every list load, so binding reload to it makes a self-feeding
+# 2-second refresh — measured at exactly 2s intervals for as long as the picker is
+# open. That is intended (states must stay live), but it MUST be async: `reload-sync`
+# holds fzf until the command returns, and the command opens with `sleep 2`, so the
+# UI was blocked essentially the whole cycle and j/k input piled up behind it.
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
   --preview="$self --preview {2}" --preview-window='up,70%,follow' \
-	--bind="load:reload-sync(sleep 2; $self --list)" \
+	--bind="load:reload(sleep 2; $self --list)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
   ${extra_opts[@]+"${extra_opts[@]}"})
 
