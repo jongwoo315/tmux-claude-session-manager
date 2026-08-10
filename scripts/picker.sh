@@ -94,10 +94,61 @@ pad_display() {
   if [ "$disp" -ge "$want" ]; then PADDED="$s"; else PADDED="$s${SPACES:0:$((want - disp))}"; fi
 }
 
+# Every sessions/<pid>.json in ONE awk pass, emitting "pid mtime src sid name".
+#
+# The row loop used to fork a grep AND a stat per json — ~32 forks per refresh with
+# 16 sessions, and the refresh runs every 2.2s for as long as the picker is open.
+# That is fine on an idle machine and not fine on a working one: measured at load
+# 3.5 with 948 processes, a bare fork cost 8.9ms, so the forks alone dominated the
+# 200ms build. This is the "it gets slow again after a while" — not the list logic
+# growing, but fork getting expensive as sessions and their MCP children pile up.
+#
+# mtimes arrive via one `stat` on the whole glob and are handed to awk as a
+# preloaded map, so the pass adds no per-file process. Values are pulled with
+# match()/substr() rather than a capture group because macOS awk has no gensub, and
+# accumulated per FILENAME then flushed at END because it has no ENDFILE either.
+json_scan() {
+  local d="$HOME/.claude/sessions" mt
+  mt=$(stat -f '%m %N' "$d"/*.json 2>/dev/null) || return 0
+  # Handed over as an environment variable, not `awk -v`: -v assignments cannot
+  # contain a literal newline and macOS awk aborts with "newline in string" — which
+  # it reports on stderr while still exiting 0, so with stderr suppressed the pass
+  # silently produced nothing and every title fell back to @claude_title.
+  MT="$mt" LC_ALL=C awk '
+    function val(s) { sub(/^[^:]*:[ \t]*"/, "", s); sub(/"$/, "", s); return s }
+    BEGIN {
+      n = split(ENVIRON["MT"], L, "\n")
+      for (i = 1; i <= n; i++) { split(L[i], p, " "); if (p[2] != "") M[p[2]] = p[1] }
+    }
+    {
+      f = FILENAME
+      files[f] = 1
+      if (!(f in nm)  && match($0, /"name"[ \t]*:[ \t]*"[^"]*"/))
+        nm[f]  = val(substr($0, RSTART, RLENGTH))
+      if (!(f in sr)  && match($0, /"nameSource"[ \t]*:[ \t]*"[^"]*"/))
+        sr[f]  = val(substr($0, RSTART, RLENGTH))
+      if (!(f in sid) && match($0, /"sessionId"[ \t]*:[ \t]*"[^"]*"/))
+        sid[f] = val(substr($0, RSTART, RLENGTH))
+    }
+    END {
+      for (f in files) {
+        pid = f; sub(/.*\//, "", pid); sub(/\.json$/, "", pid)
+        # \037, not tab: nameSource is ABSENT for an explicitly named session, and
+        # tab is an IFS whitespace character, so bash `read` collapses the run of
+        # delimiters around the empty field and every later field shifts left — the
+        # sessionId landed in nameSource and the name in sessionId, so titles fell
+        # back to @claude_title. Same reason the list rows below use \037.
+        printf "%s\037%s\037%s\037%s\037%s\n", pid, (f in M ? M[f] : 0), \
+               (f in sr ? sr[f] : ""), (f in sid ? sid[f] : ""), (f in nm ? nm[f] : "")
+      }
+    }' "$d"/*.json 2>/dev/null
+}
+
 emit_rows() {
-  local now ps_snap fmt sessions roots subtrees line root
+  local now ps_snap fmt sessions roots subtrees line root jscan
   now=$(date +%s)
   ps_snap=$(ps -axo pid=,ppid=,comm=)
+  jscan=$(json_scan)
 
   # ONE tmux call for every field of every claude session (name, state, at, pane
   # pid, @claude_title, path) — replaces the per-row show-options x2 +
@@ -145,22 +196,15 @@ emit_rows() {
     # derived one is tagged "nameSource":"derived". Prefer explicit names; else the
     # launcher's @claude_title (dir#N); else the dir basename. (pane_title avoided
     # — for an unnamed session it holds Claude's auto-summary, not a label.)
+    # Pure-bash lookup into the single json_scan pass — no fork inside the row loop.
     title=""; best_m=0; sid=""; sid_m=0
     for cp in $pids; do
-      cf="$HOME/.claude/sessions/${cp}.json"
-      [ -r "$cf" ] || continue
-      # One grep pulls "name", "nameSource" AND "sessionId"; first of each wins.
-      # Folded into the existing grep rather than run as a second pass — this loop
-      # is the hot path the fork-reduction work was about.
-      src=""; cn=""; csid=""
-      while IFS= read -r kv; do
-        case "$kv" in
-          '"nameSource"'*) [ -z "$src" ]  && { src=${kv#*:};  src=${src//\"/};  src=${src# }; } ;;
-          '"sessionId"'*)  [ -z "$csid" ] && { csid=${kv#*:}; csid=${csid//\"/}; csid=${csid# }; } ;;
-          '"name"'*)       [ -z "$cn" ]   && { cn=${kv#*:};   cn=${cn//\"/};   cn=${cn# }; } ;;
-        esac
-      done < <(LC_ALL=C /usr/bin/grep -oE '"(name|nameSource|sessionId)"[[:space:]]*:[[:space:]]*"[^"]*"' "$cf" 2>/dev/null)
-      cm=$(stat -f %m "$cf" 2>/dev/null)
+      cm=""; src=""; csid=""; cn=""
+      while IFS=$'\037' read -r jp jm jsrc jsid jn; do
+        [ "$jp" = "$cp" ] || continue
+        cm="$jm"; src="$jsrc"; csid="$jsid"; cn="$jn"; break
+      done <<<"$jscan"
+      [ -z "$cm" ] && continue
       # sessionId tracks the freshest json REGARDLESS of nameSource — the transcript
       # lookup needs it even for a session whose name was auto-derived, and those
       # are skipped by the title rules below.
