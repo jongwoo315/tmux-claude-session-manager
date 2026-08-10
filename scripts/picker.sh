@@ -52,9 +52,16 @@ prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
 # pane_pid points at the OUTER claude, so we walk the subtree and later pick the
 # freshest json. One awk for ALL rows (not per-row) — a per-row walk over each
 # session's dozens of MCP/node children, every 2s reload, made the picker crawl.
+#
+# $3 is the space-separated set of pids that own a sessions/<pid>.json, and it is
+# what identifies a claude here — the snapshot no longer carries `comm`. Asking ps
+# for comm costs 20ms of the ~107ms refresh (44.8 -> 24.5, measured at 877
+# processes) because it resolves an executable name per process, and json_scan has
+# already produced the same answer for free: those files are named by claude pid.
 claude_subtrees() {
-  awk -v roots="$1" '
-    { c=$3; sub(/.*\//, "", c); comm[$1]=c; kids[$2]=kids[$2] " " $1 }
+  awk -v roots="$1" -v jpids="$3" '
+    BEGIN { nj=split(jpids, J, " "); for (i=1; i<=nj; i++) if (J[i] != "") isclaude[J[i]]=1 }
+    { kids[$2]=kids[$2] " " $1 }
     END {
       nr=split(roots, R, " ")
       for (r=1; r<=nr; r++) {
@@ -62,7 +69,7 @@ claude_subtrees() {
         delete q; n=0; q[++n]=root; line=root
         for (i=1; i<=n; i++) {
           p=q[i]
-          if (comm[p]=="claude") line=line " " p
+          if (p in isclaude) line=line " " p
           m=split(kids[p], a, " ")
           for (j=1; j<=m; j++) if (a[j] != "") q[++n]=a[j]
         }
@@ -145,10 +152,20 @@ json_scan() {
 }
 
 emit_rows() {
-  local now ps_snap fmt sessions roots subtrees line root jscan
+  local now ps_snap fmt sessions roots subtrees line root jscan jpids f
   now=$(date +%s)
-  ps_snap=$(ps -axo pid=,ppid=,comm=)
+  # No `comm` and no `-a`: the claude test comes from the json pid set below, and
+  # -a would add every other user's processes (876 rows vs 684) for nothing.
+  ps_snap=$(ps -xo pid=,ppid=)
   jscan=$(json_scan)
+  # The sessions dir listing IS the claude pid set. Glob + parameter expansion,
+  # so no fork and no herestring — bash 3.2 backs `<<<` with a real temp file.
+  jpids=''
+  for f in "$HOME"/.claude/sessions/*.json; do
+    [ -e "$f" ] || continue
+    f=${f##*/}
+    jpids="$jpids ${f%.json}"
+  done
 
   # ONE tmux call for every field of every claude session (name, state, at, pane
   # pid, @claude_title, path) — replaces the per-row show-options x2 +
@@ -157,15 +174,23 @@ emit_rows() {
   # field (e.g. orch sessions have no @claude_title) would collapse and shift the
   # remaining columns. \037 never appears in a name or path.
   fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}')
-  sessions=$(tmux list-sessions -F "$fmt" 2>/dev/null | grep "^${prefix}")
+  # Filtered by tmux, not by a piped grep: -f evaluates the same prefix test
+  # server-side and saves a fork per refresh (verified to select the identical 17
+  # sessions). #{m:...} is a glob match, so the prefix needs a trailing *.
+  sessions=$(tmux list-sessions -f "#{m:${prefix}*,#{session_name}}" -F "$fmt" 2>/dev/null)
   [ -z "$sessions" ] && return
 
   # pane-root pid -> its claude-subtree pids, all roots resolved in ONE awk pass.
   # $subtrees holds "<root> <pid>..." lines; the row loop looks a root up with a
   # pure-bash while (no fork, no `declare -A` — macOS still ships bash 3.2, which
   # has no associative arrays).
-  roots=$(printf '%s\n' "$sessions" | cut -d$'\037' -f4 | tr '\n' ' ')
-  subtrees=$(claude_subtrees "$roots" "$ps_snap")
+  # Roots collected in-loop rather than `cut | tr` — two more forks for a field
+  # split bash already does.
+  roots=''
+  while IFS=$'\037' read -r _ _ _ root _; do
+    [ -n "$root" ] && roots="$roots $root"
+  done <<<"$sessions"
+  subtrees=$(claude_subtrees "$roots" "$ps_snap" "$jpids")
 
   printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact; do
     # A user ESC-interrupt ends the turn without firing ANY hook — Claude Code has
