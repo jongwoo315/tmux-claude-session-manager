@@ -42,13 +42,80 @@ export CLAUDE_PREVIEW_AWK='
     if (start < 1) start = 1
     for (i = start; i <= last; i++) print a[i]
   }'
-PREVIEW_CMD='tmux capture-pane -ept {2} -S -80 2>/dev/null |
+# Column width the frozen notice wraps to. Fixed rather than derived from the
+# window: the preview runs ~168 columns wide here, so anything comfortably under
+# that both reads well and lets --list decide the wrap while the preview only has
+# to shift the block right by a constant.
+NOTICE_W=72
+
+# Field 8 of a row is empty for a session whose pane is still moving, and holds a
+# ready-made notice for one that has not repainted in @claude_preview_max_age
+# seconds. Capturing those is pure waste — a pane idle for days renders the same
+# bytes on every keystroke — so the notice is printed instead and tmux is never
+# asked. 34.5ms -> 13.9ms per keystroke at the spacing that actually hurts (one
+# tap per ~0.8s; holding j/k costs neither, fzf skips the preview while input is
+# pending). 13.9ms is the floor: fzf still spawns one sh per row and no per-item
+# branch can avoid that.
+#
+# The decision is made in --list, not here, because --list already reads
+# #{window_activity} and knows `now`. Doing it in the preview would cost a second
+# tmux round trip, which is the thing being removed.
+# {8} is NOT wrapped in quotes here: fzf substitutes placeholders already shell
+# quoted, so "{8}" on an empty field yields a literal '' — two apostrophes, which
+# test -n reads as non-empty and every row printed them instead of a preview.
+#
+# The notice is centred in the window. {9} is its row count and NOTICE_W its fixed
+# column width, both settled in --list, so the offsets are two subtractions and no
+# measuring. Everything here is a shell builtin — adding an awk just to lay out a
+# handful of lines would put a third of the saved time back.
+#
+# {9} is assigned to _n before any arithmetic touches it. fzf runs this with
+# $SHELL, which is zsh on this machine, and fzf substitutes placeholders shell
+# quoted — zsh rejects the quoted operand in $(( x - '18' )) outright, so the
+# whole preview came back as a math error.
+PREVIEW_CMD='[ -n {8} ] && {
+    _t={8}; _n={9}; _pad=""; _i=0
+    _down=$(( ( ${FZF_PREVIEW_LINES:-40} - _n ) / 2 ))
+    _in=$(( ( ${FZF_PREVIEW_COLUMNS:-80} - '"$NOTICE_W"' ) / 2 ))
+    while [ $_i -lt $_down ]; do printf "\n"; _i=$(( _i + 1 )); done
+    _i=0; while [ $_i -lt $_in ]; do _pad="$_pad "; _i=$(( _i + 1 )); done
+    printf "%b\n" "$_pad${_t//\\n/\\n$_pad}"
+    exit 0
+  }
+  tmux capture-pane -ept {2} -S -80 2>/dev/null |
   awk -v want=$(( ${FZF_PREVIEW_LINES:-60} + 2 )) "$CLAUDE_PREVIEW_AWK"'
 
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
 
 prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
+
+# Seconds a pane may sit unchanged before its preview is replaced by a notice.
+# Accepts a bare number of seconds or an s/m/h/d suffix (300, 10m, 1h, 1d). 0 or
+# `off` keeps every preview live.
+#
+# Sessions here are bimodal — either in use right now or untouched for days — so
+# the exact value barely matters: measured on a 17-session list, a 1-minute and a
+# 10-minute threshold both silenced the same 15 panes, and only at 1 hour did the
+# count start to fall (12), then 6 at a day.
+preview_max_age="$(get_tmux_option @claude_preview_max_age '5m')"
+case "$preview_max_age" in
+off | none) preview_max_age=0 ;;
+*d) preview_max_age=$(( ${preview_max_age%d} * 86400 )) ;;
+*h) preview_max_age=$(( ${preview_max_age%h} * 3600 )) ;;
+*m) preview_max_age=$(( ${preview_max_age%m} * 60 )) ;;
+*s) preview_max_age=${preview_max_age%s} ;;
+esac
+case "$preview_max_age" in '' | *[!0-9]*) preview_max_age=300 ;; esac
+
+# Whole units, largest that still reads as a round number. No fork.
+human_age() {
+  local s="$1"
+  if [ "$s" -ge 86400 ]; then HUMAN="$((s / 86400))d"
+  elif [ "$s" -ge 3600 ]; then HUMAN="$((s / 3600))h"
+  elif [ "$s" -ge 60 ]; then HUMAN="$((s / 60))m"
+  else HUMAN="${s}s"; fi
+}
 
 # Build, in ONE awk pass over a ps snapshot ($2), each pane root's claude-subtree
 # pids: emits "<root> <claudePid>..." per root ($1 = space-separated roots). A
@@ -208,6 +275,61 @@ resolve_titles() {
   done
 }
 
+# Adds a 4th field, the session's last typed prompt, to resolve_titles' output.
+#
+# One `last-prompt.py` for the whole list, not one per row: transcripts reach
+# 86MB so only their tails can be read, and doing that in the shell would be a
+# `tail` plus a parser per session. A single interpreter start covering all 17
+# measured 62ms warm, and it lands on the cache-rebuild path (every 15s at most),
+# never on the keystroke path.
+#
+# python3 is optional. Without it every prompt is empty and the frozen-preview
+# notice simply omits that section — the picker itself does not depend on python.
+add_prompts() {
+  local rows="$1" sids='' line pid title sid prompts=''
+  while IFS=$'\037' read -r pid title sid; do
+    [ -n "$sid" ] && sids="$sids $sid"
+  done <<<"$rows"
+  if [ -n "$sids" ] && command -v python3 >/dev/null 2>&1; then
+    prompts=$(python3 "$DIR/last-prompt.py" $sids 2>/dev/null)
+  fi
+  while IFS=$'\037' read -r pid title sid; do
+    [ -n "$pid" ] || continue
+    local prompt=''
+    if [ -n "$sid" ] && [ -n "$prompts" ]; then
+      local psid ptext
+      while IFS=$'\t' read -r psid ptext; do
+        [ "$psid" = "$sid" ] && { prompt="$ptext"; break; }
+      done <<<"$prompts"
+    fi
+    printf '%s\037%s\037%s\037%s\n' "$pid" "$title" "$sid" "$prompt"
+  done <<<"$rows"
+}
+
+# Greedy wrap of $1 to $2 display columns, result in $WRAPPED as one line per row
+# joined by a literal backslash-n (rows are newline delimited, so a real newline
+# cannot travel in a field). Width is counted the way pad_display counts it: a
+# CJK char is 3 bytes but 2 columns, so (bytes-chars)/2 is the surplus.
+wrap_text() {
+  local text="$1" want="$2" word out='' cur='' w
+  WRAPPED=''
+  for word in $text; do
+    if [ -z "$cur" ]; then cur="$word"; continue; fi
+    w="$cur $word"
+    local chars=${#w} bytes
+    local LC_ALL=C
+    bytes=${#w}
+    if [ $((chars + (bytes - chars) / 2)) -le "$want" ]; then
+      cur="$w"
+    else
+      out="$out$cur\\n"
+      cur="$word"
+    fi
+  done
+  [ -n "$cur" ] && out="$out$cur"
+  WRAPPED="$out"
+}
+
 # Split refresh. State (working/waiting/idle) must be live — that is the whole
 # point of the picker — but titles and sessionIds are the slow half and change
 # only on a new session or an in-session /rename.
@@ -261,8 +383,8 @@ save_titles() {
 }
 
 emit_rows() {
-  local now fmt sessions roots root line i
-  local -a T_PID T_TITLE T_SID
+  local now fmt sessions roots root line i frozen frozen_rows idle_for prompt
+  local -a T_PID T_TITLE T_SID T_PROMPT
   now=$(date +%s)
 
   # ONE tmux call for every field of every claude session (name, state, at, pane
@@ -286,7 +408,7 @@ emit_rows() {
   done <<<"$sessions"
 
   load_titles "$roots" "$now" || {
-    TITLES="$(resolve_titles "$roots")
+    TITLES="$(add_prompts "$(resolve_titles "$roots")")
 "
     save_titles "$roots" "$now" "$TITLES"
   }
@@ -296,11 +418,12 @@ emit_rows() {
   # create one per session on every refresh. One herestring here, then an indexed
   # scan the row loop below can do fork-free. The pipeline's subshell inherits
   # these.
-  while IFS=$'\037' read -r line title sid; do
+  while IFS=$'\037' read -r line title sid prompt; do
     [ -n "$line" ] || continue
     T_PID[${#T_PID[@]}]="$line"
     T_TITLE[${#T_TITLE[@]}]="$title"
     T_SID[${#T_SID[@]}]="$sid"
+    T_PROMPT[${#T_PROMPT[@]}]="$prompt"
   done <<<"$TITLES"
 
   printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact; do
@@ -325,8 +448,11 @@ emit_rows() {
     [ "$state" = working ] && [ -n "$wact" ] && [ $((now - wact)) -gt 30 ] && state=idle
     # Indexed scan of the resolve_titles/cache result — no fork, no temp file.
     title=""; sid=""; i=0
+    prompt=''
     while [ "$i" -lt ${#T_PID[@]} ]; do
-      [ "${T_PID[$i]}" = "$pid" ] && { title="${T_TITLE[$i]}"; sid="${T_SID[$i]}"; break; }
+      [ "${T_PID[$i]}" = "$pid" ] && {
+        title="${T_TITLE[$i]}"; sid="${T_SID[$i]}"; prompt="${T_PROMPT[$i]}"; break
+      }
       i=$((i + 1))
     done
     # Fall back to the launcher's @claude_title (dir#N), then the dir basename.
@@ -349,8 +475,40 @@ emit_rows() {
     # floats to group top).
     # Field 7 (sessionId) is for web-server.js to locate the transcript; fzf renders
     # only fields 3..6, so it never shows up in the picker itself.
+    #
+    # Field 8 is the preview notice, empty for a live pane. Built here rather than
+    # in the preview because #{window_activity} and `now` are already in hand; see
+    # PREVIEW_CMD. A session with no activity stamp is treated as live — better a
+    # wasted capture than a silently blank preview.
+    frozen=''; frozen_rows=0
+    if [ "$preview_max_age" -gt 0 ] && [ -n "$wact" ] &&
+      [ $((now - wact)) -gt "$preview_max_age" ]; then
+      human_age $((now - wact)); idle_for="$HUMAN"
+      human_age "$preview_max_age"
+      # Rows are newline delimited, so the notice carries literal \n and the
+      # preview expands them with printf %b. Fixed block width: the preview is
+      # ~168 columns, so wrapping to NOTICE_W keeps every line inside it and makes
+      # the centring offset a constant the preview can compute without measuring
+      # anything.
+      frozen="⏸  preview off · this pane has not changed in $idle_for"
+      frozen_rows=1
+      if [ -n "$prompt" ]; then
+        wrap_text "$prompt" $((NOTICE_W - 2))
+        frozen="$frozen\\n\\nyour last prompt:"
+        frozen="$frozen\\n\\n  ${WRAPPED//\\n/\\n  }"
+        frozen_rows=$((frozen_rows + 4))
+        # One row per \n added by the wrap.
+        line="${WRAPPED}"
+        while [ "${line#*\\n}" != "$line" ]; do
+          line="${line#*\\n}"
+          frozen_rows=$((frozen_rows + 1))
+        done
+      fi
+      frozen="$frozen\\n\\n@claude_preview_max_age = $HUMAN · set it to 'off' to always preview"
+      frozen_rows=$((frozen_rows + 2))
+    fi
     pad_display "$title" 44
-    printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "${path/#$HOME/~}" "$sid"
+    printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
   done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n
 }
 
