@@ -73,17 +73,31 @@ NOTICE_W=72
 # $SHELL, which is zsh on this machine, and fzf substitutes placeholders shell
 # quoted — zsh rejects the quoted operand in $(( x - '18' )) outright, so the
 # whole preview came back as a math error.
-PREVIEW_CMD='[ -n {8} ] && {
-    _t={8}; _n={9}; _pad=""; _i=0
-    _down=$(( ( ${FZF_PREVIEW_LINES:-40} - _n ) / 2 ))
-    _in=$(( ( ${FZF_PREVIEW_COLUMNS:-80} - '"$NOTICE_W"' ) / 2 ))
-    while [ $_i -lt $_down ]; do printf "\n"; _i=$(( _i + 1 )); done
-    _i=0; while [ $_i -lt $_in ]; do _pad="$_pad "; _i=$(( _i + 1 )); done
-    printf "%b\n" "$_pad${_t//\\n/\\n$_pad}"
-    exit 0
-  }
-  tmux capture-pane -ept {2} -S -80 2>/dev/null |
-  awk -v want=$(( ${FZF_PREVIEW_LINES:-60} + 2 )) "$CLAUDE_PREVIEW_AWK"'
+#
+# Written on ONE line so the same string can also be handed to a --bind action.
+# fzf parses a bind action up to its matching paren and a literal newline inside
+# it silently swallows the whole binding, so the readable indented form could not
+# be reused for the ctrl-o restore below.
+PREVIEW_CMD='[ -n {8} ] && { _t={8}; _n={9}; _pad=""; _i=0; _down=$(( ( ${FZF_PREVIEW_LINES:-40} - _n ) / 2 )); _in=$(( ( ${FZF_PREVIEW_COLUMNS:-80} - '"$NOTICE_W"' ) / 2 )); while [ $_i -lt $_down ]; do printf "\n"; _i=$(( _i + 1 )); done; _i=0; while [ $_i -lt $_in ]; do _pad="$_pad "; _i=$(( _i + 1 )); done; printf "%b\n" "$_pad${_t//\\n/\\n$_pad}"; exit 0; }; tmux capture-pane -ept {2} -S -80 2>/dev/null | awk -v want=$(( ${FZF_PREVIEW_LINES:-60} + 2 )) "$CLAUDE_PREVIEW_AWK"'
+
+# ctrl-g swaps the preview over to the live pane; ctrl-o swaps back.
+#
+# `change-preview` rather than the one-shot `preview(...)`, which is what this
+# wanted to be: fzf's transient preview is wiped by the next preview refresh, and
+# the 2s auto-reload refreshes it constantly. Measured — the pane showed for about
+# 0.5s and the notice was back by 1.0s, every time. A mode you have to leave
+# explicitly is worse than one that expires, but a mode that expires in half a
+# second is not a mode at all.
+#
+# Deeper and taller than the always-on path: 2000 lines of scrollback and 500 rows
+# emitted, so the window can be scrolled back through a long run. Those were kept
+# small on the always-on path precisely because they were paid on every keypress;
+# here you asked for it. While this mode is on, j/k does pay the capture cost
+# again — that is the trade, and ctrl-o ends it.
+#
+# The trailing echo is the way back out. --preview-window has `follow`, so the
+# view sits at the end of the output and that line is what you are looking at.
+PANE_CMD='tmux capture-pane -ept {2} -S -2000 2>/dev/null | awk -v want=500 "$CLAUDE_PREVIEW_AWK"; printf "\n\033[7m ctrl-o: back to prompt \033[0m\n"'
 
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
@@ -554,7 +568,7 @@ emit_rows() {
           frozen_rows=$((frozen_rows + 1))
         done
       fi
-      frozen="$frozen\\n\\nctrl-g: show this session's screen  ·  @claude_preview_max_age = $HUMAN"
+      frozen="$frozen\\n\\nctrl-g: live pane · ctrl-o: back  ·  @claude_preview_max_age = $HUMAN"
       frozen_rows=$((frozen_rows + 2))
     fi
     pad_display "$title" 44
@@ -634,7 +648,8 @@ sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --preview="$PREVIEW_CMD" --preview-window='up,70%,follow' \
 	--bind="load:reload($self --list; sleep 2)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
-  --bind="ctrl-g:execute(tmux capture-pane -ept {2} -S -2000 | less -R +G)" \
+  --bind="ctrl-g:change-preview($PANE_CMD)" \
+  --bind="ctrl-o:change-preview($PREVIEW_CMD)" \
   ${pos_opt[@]+"${pos_opt[@]}"} \
   ${extra_opts[@]+"${extra_opts[@]}"})
 
