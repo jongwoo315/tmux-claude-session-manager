@@ -566,11 +566,37 @@ trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 #   afterwards keeps the rows on screen the whole time and the delay between
 #   refreshes unchanged — 127ms, i.e. the no-reload baseline, with 0 empty frames
 #   sampled over 6 seconds.
-sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
+# Open on the session you were last inside rather than at the top of the list.
+# @claude_last_session is maintained by record-last.sh off tmux's client-attached
+# hook, so it survives however you left — picker, prefix+y, or a plain detach.
+#
+# The rows are materialised here instead of being piped straight into fzf because
+# the cursor position has to be counted before fzf starts. `start` runs the action
+# before anything has been read, so the list is handed over with --sync; without
+# it pos() lands on an empty list and does nothing.
+#
+# A stale name (session since killed) simply never matches and the picker opens at
+# the top, which is the old behaviour.
+rows=$(emit_rows)
+[ -z "$rows" ] && exit 0
+last=$(tmux show-option -gqv @claude_last_session 2>/dev/null)
+start_pos=0
+if [ -n "$last" ]; then
+  n=0
+  while IFS=$'\t' read -r _ name _; do
+    n=$((n + 1))
+    [ "$name" = "$last" ] && { start_pos=$n; break; }
+  done <<<"$rows"
+fi
+pos_opt=()
+[ "$start_pos" -gt 0 ] && pos_opt=(--sync --bind="start:pos($start_pos)")
+
+sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
   --preview="$PREVIEW_CMD" --preview-window='up,70%,follow' \
 	--bind="load:reload($self --list; sleep 2)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
+  ${pos_opt[@]+"${pos_opt[@]}"} \
   ${extra_opts[@]+"${extra_opts[@]}"})
 
 [ -z "$sel" ] && exit 0
