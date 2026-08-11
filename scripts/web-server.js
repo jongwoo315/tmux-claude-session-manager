@@ -36,18 +36,27 @@ const ANSI = /\x1b\[[0-9;]*m/g
 // picker.sh --list emits: rank \t session \t icon \t age \t paddedTitle \t path
 // We depend on that layout, so parse tolerantly — a format change should degrade
 // to state:"unknown", never throw and kill the poll loop.
-// ---- last typed prompt, read from the session transcript ---------------------
+// ---- last thing the user typed, read from the session transcript -------------
 //
-// A transcript is ~/.claude/projects/<slug>/<sessionId>.jsonl. Real prompts carry
-// promptSource "typed" | "queued" | "suggestion_accepted"; the far more numerous
-// tool-result entries have promptSource null and list (not string) content, and
-// subagent turns are isSidechain. Filtering on those three things is what
-// separates "what the user actually said" from the rest of the conversation.
+// A transcript is ~/.claude/projects/<slug>/<sessionId>.jsonl. Two record shapes
+// count as typed, and scripts/last-prompt.py applies the same two:
+//
+//   * a prompt — promptSource "typed" | "queued" | "suggestion_accepted", string
+//     content, not isSidechain (that marks a subagent turn).
+//   * a `!` shell command — promptSource null and the content wrapped in
+//     <bash-input>. Reported with a leading "! ".
+//
+// The far more numerous tool-result entries are also type "user" but carry list
+// content and no promptSource; system-reminders, slash-command expansions and
+// task notifications are strings that fail both tests. In a 17-session sample
+// those were 1440 of 1633 user records, which is what this filter is really for.
 //
 // Transcripts reach tens of megabytes, so only the tail is read, and only when
 // the file's mtime has moved. The path lookup is cached too — finding it means
 // stat-ing one candidate per project directory.
 const PROMPT_SRC = new Set(['typed', 'queued', 'suggestion_accepted'])
+const BANG_OPEN = '<bash-input>'
+const BANG_CLOSE = '</bash-input>'
 // Escalating windows. 256KB covers a session you have typed in recently, but a
 // long autonomous stretch buries the prompt under tool traffic — one measured at
 // 286KB back, just past a fixed 256KB window, which is exactly the silent miss
@@ -89,9 +98,18 @@ function scanTail(file, size, bytes) {
     let o
     try { o = JSON.parse(l) } catch { continue }
     if (o.type !== 'user' || o.isSidechain) continue
-    if (!PROMPT_SRC.has(o.promptSource)) continue
     const t = o.message && o.message.content
     if (typeof t !== 'string' || !t.trim()) continue
+    if (!PROMPT_SRC.has(o.promptSource)) {
+      // A `!` command has no promptSource, so the wrapper is the only marker.
+      // The tags hold just the command — its output is a separate record — so
+      // stripping them leaves exactly what was typed.
+      const s = t.trim()
+      if (!s.startsWith(BANG_OPEN) || !s.endsWith(BANG_CLOSE)) continue
+      const cmd = s.slice(BANG_OPEN.length, -BANG_CLOSE.length).trim()
+      if (!cmd) continue
+      return ('! ' + cmd.replace(/\s+/g, ' ')).slice(0, PROMPT_MAX)
+    }
     return t.trim().replace(/\s+/g, ' ').slice(0, PROMPT_MAX)
   }
   return null
