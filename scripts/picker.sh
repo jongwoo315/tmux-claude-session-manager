@@ -7,39 +7,43 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# --preview is dispatched FIRST, before sourcing helpers and before reading any
-# tmux option. fzf re-runs it on every j/k, so anything above it is paid per
-# keystroke: the @claude_session_prefix lookup alone measured 10.4ms of a 25.9ms
-# preview — 40% spent on a value the preview never reads. preview_pane needs only
-# tmux and awk.
-preview_pane() {
-  [ -n "${1:-}" ] || return 0
-  # Only as many lines as the preview window can show. fzf exports its geometry to
-  # the preview command; without the cap this emitted 280 lines / 26KB into a ~51
-  # row window on EVERY keystroke, and at key-repeat speed that is the better part
-  # of a megabyte per second pushed through a tmux popup — which is what the j/k
-  # "lag" actually was. Scrollback still comes in (-S) so the window stays full
-  # even when the pane itself is mostly blank; it is just trimmed to fit.
-  local want=$(( ${FZF_PREVIEW_LINES:-60} + 2 ))
-  tmux capture-pane -ept "$1" -S -200 2>/dev/null | awk -v want="$want" '
-    BEGIN { esc = sprintf("%c", 27) }
-    {
-      a[NR] = $0
-      t = $0
-      gsub(esc "\\[[0-9;?]*[a-zA-Z]", "", t)
-      if (t ~ /[^[:space:]]/) last = NR
-    }
-    END {
-      start = last - want + 1
-      if (start < 1) start = 1
-      for (i = start; i <= last; i++) print a[i]
-    }'
-}
-
-[ "${1:-}" = '--preview' ] && {
-  preview_pane "${2:-}"
-  exit 0
-}
+# The preview runs on EVERY j/k, so everything on that path is paid per keystroke.
+# It used to re-enter this script (`picker.sh --preview`), which cost a second bash
+# startup plus a parse of the whole file: 19.2ms per keystroke against 11.3ms for
+# the same pipeline run directly, measured over 40 runs each. fzf executes the
+# --preview string with `sh -c`, so the pipeline goes there verbatim and only tmux
+# and awk are spawned.
+#
+# Holding j/k is smooth while tapping it is not, because fzf skips the preview
+# entirely while more input is pending — so the per-keystroke preview cost IS the
+# lag, and it only shows up when you move one row at a time.
+#
+# Only as many lines as the preview window can show. fzf exports its geometry to
+# the preview command; without the cap this emitted 280 lines / 26KB into a ~51 row
+# window on every keystroke. Scrollback still comes in (-S) so the window stays
+# full even when the pane itself is mostly blank; it is just trimmed to fit. -S -80
+# rather than -200: the trim never needs more than `want` lines of history and the
+# smaller capture is measurably cheaper (9.9ms vs 11.3ms).
+#
+# The awk program travels in the environment instead of being quoted into the
+# --preview string. Expanding "$CLAUDE_PREVIEW_AWK" inside sh yields the text
+# literally — the result of a parameter expansion is not rescanned — so the $0 and
+# the backslashes in the program survive without a second layer of escaping.
+export CLAUDE_PREVIEW_AWK='
+  BEGIN { esc = sprintf("%c", 27) }
+  {
+    a[NR] = $0
+    t = $0
+    gsub(esc "\\[[0-9;?]*[a-zA-Z]", "", t)
+    if (t ~ /[^[:space:]]/) last = NR
+  }
+  END {
+    start = last - want + 1
+    if (start < 1) start = 1
+    for (i = start; i <= last; i++) print a[i]
+  }'
+PREVIEW_CMD='tmux capture-pane -ept {2} -S -80 2>/dev/null |
+  awk -v want=$(( ${FZF_PREVIEW_LINES:-60} + 2 )) "$CLAUDE_PREVIEW_AWK"'
 
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
@@ -151,9 +155,14 @@ json_scan() {
     }' "$d"/*.json 2>/dev/null
 }
 
-emit_rows() {
-  local now ps_snap fmt sessions roots subtrees line root jscan jpids f
-  now=$(date +%s)
+# Per-root title + sessionId, emitted as "<root>\037<title>\037<sid>" per line.
+#
+# This is the expensive half of a refresh — ps, every sessions/*.json, and a
+# subtree walk — and it is the half that almost never changes. Split out so the
+# cache below can skip it while the state columns stay live. See load_titles.
+resolve_titles() {
+  local roots="$1" ps_snap jscan jpids f subtrees line pid pids cp cm src csid cn
+  local title best_m sid sid_m
   # No `comm` and no `-a`: the claude test comes from the json pid set below, and
   # -a would add every other user's processes (876 rows vs 684) for nothing.
   ps_snap=$(ps -xo pid=,ppid=)
@@ -166,6 +175,95 @@ emit_rows() {
     f=${f##*/}
     jpids="$jpids ${f%.json}"
   done
+  subtrees=$(claude_subtrees "$roots" "$ps_snap" "$jpids")
+
+  for pid in $roots; do
+    pids=""
+    while IFS= read -r line; do
+      [ "${line%% *}" = "$pid" ] && { pids=${line#* }; break; }
+    done <<<"$subtrees"
+    # Freshest explicitly-named sessions/<pid>.json across this pane's claude
+    # subtree. A user-set name (--name or /rename) has NO nameSource; an auto-
+    # derived one is tagged "nameSource":"derived". Prefer explicit names; the
+    # caller falls back to @claude_title and then the dir basename when this is
+    # empty. (pane_title avoided — for an unnamed session it holds Claude's
+    # auto-summary, not a label.)
+    title=""; best_m=0; sid=""; sid_m=0
+    for cp in $pids; do
+      cm=""; src=""; csid=""; cn=""
+      while IFS=$'\037' read -r jp jm jsrc jsid jn; do
+        [ "$jp" = "$cp" ] || continue
+        cm="$jm"; src="$jsrc"; csid="$jsid"; cn="$jn"; break
+      done <<<"$jscan"
+      [ -z "$cm" ] && continue
+      # sessionId tracks the freshest json REGARDLESS of nameSource — the transcript
+      # lookup needs it even for a session whose name was auto-derived, and those
+      # are skipped by the title rules below.
+      [ -n "$csid" ] && [ "${cm:-0}" -ge "$sid_m" ] && { sid_m="${cm:-0}"; sid="$csid"; }
+      [ "$src" = "derived" ] && continue
+      [ -z "$cn" ] && continue
+      [ "${cm:-0}" -ge "$best_m" ] && { best_m="${cm:-0}"; title="$cn"; }
+    done
+    printf '%s\037%s\037%s\n' "$pid" "$title" "$sid"
+  done
+}
+
+# Split refresh. State (working/waiting/idle) must be live — that is the whole
+# point of the picker — but titles and sessionIds are the slow half and change
+# only on a new session or an in-session /rename.
+#
+# The refresh runs every 2.1s for as long as the picker is open, and it competes
+# with the popup for the SAME tmux server. Measured key->screen latency at 17
+# sessions, 48 samples per variant over 3 interleaved rounds: 50ms p50 with the
+# full refresh, 22ms with this half cached, 21ms with no refresh at all. So the
+# slow half accounts for essentially all of the interactive lag.
+#
+# Invalidation is on the root pid set FIRST and time only second: a created or
+# killed session changes the set and rebuilds at once, so a new session is never
+# shown untitled. The TTL only bounds how long an in-place /rename stays stale.
+TITLE_TTL=15
+TITLE_CACHE="${TMPDIR:-/tmp}/tmux-claude-picker-titles.$UID"
+
+# Fills $TITLES from the cache; returns 1 (miss) if absent, stale, or built for a
+# different set of sessions. Reads line-by-line rather than $(cat …) — a fork here
+# would eat a third of what the cache saves.
+load_titles() {
+  local roots="$1" now="$2" built sig line first=1
+  TITLES=''
+  [ -f "$TITLE_CACHE" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$first" = 1 ]; then
+      first=0
+      built=${line%%$'\037'*}
+      sig=${line#*$'\037'}
+      [ "$sig" = "$roots" ] || return 1
+      case "$built" in '' | *[!0-9]*) return 1 ;; esac
+      [ $((now - built)) -le "$TITLE_TTL" ] || return 1
+      continue
+    fi
+    TITLES="$TITLES$line
+"
+  done <"$TITLE_CACHE"
+  [ "$first" = 0 ] || return 1
+  return 0
+}
+
+# Written to a temp name and renamed so a concurrent picker never reads a half
+# written cache (two popups can be open on different clients).
+save_titles() {
+  local roots="$1" now="$2" body="$3" tmp="$TITLE_CACHE.$$"
+  {
+    printf '%s\037%s\n' "$now" "$roots"
+    printf '%s' "$body"
+  } >"$tmp" 2>/dev/null && mv -f "$tmp" "$TITLE_CACHE" 2>/dev/null ||
+    rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+emit_rows() {
+  local now fmt sessions roots root line i
+  local -a T_PID T_TITLE T_SID
+  now=$(date +%s)
 
   # ONE tmux call for every field of every claude session (name, state, at, pane
   # pid, @claude_title, path) — replaces the per-row show-options x2 +
@@ -180,17 +278,30 @@ emit_rows() {
   sessions=$(tmux list-sessions -f "#{m:${prefix}*,#{session_name}}" -F "$fmt" 2>/dev/null)
   [ -z "$sessions" ] && return
 
-  # pane-root pid -> its claude-subtree pids, all roots resolved in ONE awk pass.
-  # $subtrees holds "<root> <pid>..." lines; the row loop looks a root up with a
-  # pure-bash while (no fork, no `declare -A` — macOS still ships bash 3.2, which
-  # has no associative arrays).
   # Roots collected in-loop rather than `cut | tr` — two more forks for a field
-  # split bash already does.
+  # split bash already does. Doubles as the cache key.
   roots=''
   while IFS=$'\037' read -r _ _ _ root _; do
     [ -n "$root" ] && roots="$roots $root"
   done <<<"$sessions"
-  subtrees=$(claude_subtrees "$roots" "$ps_snap" "$jpids")
+
+  load_titles "$roots" "$now" || {
+    TITLES="$(resolve_titles "$roots")
+"
+    save_titles "$roots" "$now" "$TITLES"
+  }
+
+  # Parallel arrays, not a herestring per row: bash 3.2 has no associative arrays
+  # and backs `<<<` with a real temp file, so a lookup inside the row loop would
+  # create one per session on every refresh. One herestring here, then an indexed
+  # scan the row loop below can do fork-free. The pipeline's subshell inherits
+  # these.
+  while IFS=$'\037' read -r line title sid; do
+    [ -n "$line" ] || continue
+    T_PID[${#T_PID[@]}]="$line"
+    T_TITLE[${#T_TITLE[@]}]="$title"
+    T_SID[${#T_SID[@]}]="$sid"
+  done <<<"$TITLES"
 
   printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact; do
     # A user ESC-interrupt ends the turn without firing ANY hook — Claude Code has
@@ -212,32 +323,15 @@ emit_rows() {
     # The gap this discriminates is enormous (0s vs 575s+), so 30s costs nothing in
     # detection: an ESC-interrupted session is stale by minutes, never by seconds.
     [ "$state" = working ] && [ -n "$wact" ] && [ $((now - wact)) -gt 30 ] && state=idle
-    pids=""
-    while IFS= read -r line; do
-      [ "${line%% *}" = "$pid" ] && { pids=${line#* }; break; }
-    done <<<"$subtrees"
-    # Freshest explicitly-named sessions/<pid>.json across this pane's claude
-    # subtree. A user-set name (--name or /rename) has NO nameSource; an auto-
-    # derived one is tagged "nameSource":"derived". Prefer explicit names; else the
-    # launcher's @claude_title (dir#N); else the dir basename. (pane_title avoided
-    # — for an unnamed session it holds Claude's auto-summary, not a label.)
-    # Pure-bash lookup into the single json_scan pass — no fork inside the row loop.
-    title=""; best_m=0; sid=""; sid_m=0
-    for cp in $pids; do
-      cm=""; src=""; csid=""; cn=""
-      while IFS=$'\037' read -r jp jm jsrc jsid jn; do
-        [ "$jp" = "$cp" ] || continue
-        cm="$jm"; src="$jsrc"; csid="$jsid"; cn="$jn"; break
-      done <<<"$jscan"
-      [ -z "$cm" ] && continue
-      # sessionId tracks the freshest json REGARDLESS of nameSource — the transcript
-      # lookup needs it even for a session whose name was auto-derived, and those
-      # are skipped by the title rules below.
-      [ -n "$csid" ] && [ "${cm:-0}" -ge "$sid_m" ] && { sid_m="${cm:-0}"; sid="$csid"; }
-      [ "$src" = "derived" ] && continue
-      [ -z "$cn" ] && continue
-      [ "${cm:-0}" -ge "$best_m" ] && { best_m="${cm:-0}"; title="$cn"; }
+    # Indexed scan of the resolve_titles/cache result — no fork, no temp file.
+    title=""; sid=""; i=0
+    while [ "$i" -lt ${#T_PID[@]} ]; do
+      [ "${T_PID[$i]}" = "$pid" ] && { title="${T_TITLE[$i]}"; sid="${T_SID[$i]}"; break; }
+      i=$((i + 1))
     done
+    # Fall back to the launcher's @claude_title (dir#N), then the dir basename.
+    # Both ride along on the live tmux read above, so a cached empty title still
+    # renders correctly.
     [ -z "$title" ] && title="$ctitle"
     [ -z "$title" ] && title="${path##*/}"
 
@@ -304,7 +398,7 @@ trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 #   sampled over 6 seconds.
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
-  --preview="$self --preview {2}" --preview-window='up,70%,follow' \
+  --preview="$PREVIEW_CMD" --preview-window='up,70%,follow' \
 	--bind="load:reload($self --list; sleep 2)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
   ${extra_opts[@]+"${extra_opts[@]}"})
