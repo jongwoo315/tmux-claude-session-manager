@@ -90,14 +90,13 @@ PREVIEW_CMD='[ -n {8} ] && {
 
 prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
 
-# Seconds a pane may sit unchanged before its preview is replaced by a notice.
-# Accepts a bare number of seconds or an s/m/h/d suffix (300, 10m, 1h, 1d). 0 or
-# `off` keeps every preview live.
+# Seconds an idle session may go without a turn before its preview is replaced by
+# a notice. Accepts a bare number of seconds or an s/m/h/d suffix (300, 10m, 1h,
+# 1d). 0 or `off` keeps every preview live.
 #
-# Sessions here are bimodal — either in use right now or untouched for days — so
-# the exact value barely matters: measured on a 17-session list, a 1-minute and a
-# 10-minute threshold both silenced the same 15 panes, and only at 1 hour did the
-# count start to fall (12), then 6 at a day.
+# Sessions are bimodal — either in use right now or untouched for days — so the
+# exact value barely matters. What does matter is which clock it reads; see the
+# frozen-notice block in emit_rows.
 preview_max_age="$(get_tmux_option @claude_preview_max_age '5m')"
 case "$preview_max_age" in
 off | none) preview_max_age=0 ;;
@@ -477,20 +476,33 @@ emit_rows() {
     # only fields 3..6, so it never shows up in the picker itself.
     #
     # Field 8 is the preview notice, empty for a live pane. Built here rather than
-    # in the preview because #{window_activity} and `now` are already in hand; see
-    # PREVIEW_CMD. A session with no activity stamp is treated as live — better a
-    # wasted capture than a silently blank preview.
+    # in the preview because the clocks and `now` are already in hand; see
+    # PREVIEW_CMD. A session with no timestamp is treated as live — better a wasted
+    # capture than a silently blank preview.
+    #
+    # Aged on @claude_state_at, NOT #{window_activity}. Activity means the pane
+    # repainted, and Claude's TUI repaints its context/reset line every couple of
+    # minutes while doing nothing at all: measured on this list, four sessions whose
+    # last real turn was 4h, 18h, 5d and 12d ago all showed activity 2-15 minutes
+    # old and so stayed live, which is exactly backwards. @claude_state_at moves
+    # only when a hook fires, i.e. on a real turn boundary.
+    #
+    # working and waiting are never frozen regardless of age. A long autonomous run
+    # holds `working` with a stale stamp and is the one session you open the picker
+    # to watch, and a `waiting` pane is asking you something — reading the question
+    # is the single most useful thing the preview does.
     frozen=''; frozen_rows=0
-    if [ "$preview_max_age" -gt 0 ] && [ -n "$wact" ] &&
-      [ $((now - wact)) -gt "$preview_max_age" ]; then
-      human_age $((now - wact)); idle_for="$HUMAN"
+    if [ "$preview_max_age" -gt 0 ] && [ -n "$at" ] &&
+      [ "$state" != working ] && [ "$state" != waiting ] &&
+      [ $((now - at)) -gt "$preview_max_age" ]; then
+      human_age $((now - at)); idle_for="$HUMAN"
       human_age "$preview_max_age"
       # Rows are newline delimited, so the notice carries literal \n and the
       # preview expands them with printf %b. Fixed block width: the preview is
       # ~168 columns, so wrapping to NOTICE_W keeps every line inside it and makes
       # the centring offset a constant the preview can compute without measuring
       # anything.
-      frozen="⏸  preview off · this pane has not changed in $idle_for"
+      frozen="⏸  preview off · no activity in this session for $idle_for"
       frozen_rows=1
       if [ -n "$prompt" ]; then
         wrap_text "$prompt" $((NOTICE_W - 2))
