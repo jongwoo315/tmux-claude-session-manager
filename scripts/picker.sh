@@ -379,13 +379,25 @@ wrap_text() {
 TITLE_TTL=120
 TITLE_CACHE="${TMPDIR:-/tmp}/tmux-claude-picker-titles.$UID"
 
-# Newest mtime across the session json files, or 0. One `stat` over the whole
-# glob and a pure-bash max — no sort/tail pipeline, which would be two more forks
-# for a comparison bash can do.
+# Newest mtime across the session json files AND the transcripts, or 0. One `stat`
+# over both globs and a pure-bash max — no sort/tail pipeline, which would be two
+# more forks for a comparison bash can do.
+#
+# The transcripts are in here because sessions/<pid>.json does NOT move when a
+# prompt arrives. Measured across the live list: one session's json was 5558s
+# behind its transcript, another 12342s — they are written on status transitions,
+# not on turns, so keying on them alone left `your last prompt` stale until the
+# 120s backstop expired. The transcript is written on every turn, so it is the
+# signal that actually matches what the notice shows.
+#
+# The obvious cost is that ANY of the ~119 transcripts changing rebuilds the
+# cache, so it was measured first: 1 of 20 samples over 40s. The wider stat costs
+# 10.7ms against 7.7ms for sessions alone.
 sessions_stamp() {
   local out m
   STAMP=0
-  out=$(stat -f '%m' "$HOME"/.claude/sessions/*.json 2>/dev/null) || return 0
+  out=$(stat -f '%m' "$HOME"/.claude/sessions/*.json \
+    "$HOME"/.claude/projects/*/*.jsonl 2>/dev/null)
   for m in $out; do
     [ "$m" -gt "$STAMP" ] && STAMP=$m
   done
