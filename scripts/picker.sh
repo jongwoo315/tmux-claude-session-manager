@@ -90,22 +90,31 @@ PREVIEW_CMD='[ -n {8} ] && {
 
 prefix="$(get_tmux_option @claude_session_prefix 'claude-')"
 
-# Seconds an idle session may go without a turn before its preview is replaced by
-# a notice. Accepts a bare number of seconds or an s/m/h/d suffix (300, 10m, 1h,
-# 1d). 0 or `off` keeps every preview live.
+# How long an idle session may go without a turn before its pane preview is
+# replaced by a notice. Three shapes:
 #
-# Sessions are bimodal — either in use right now or untouched for days — so the
-# exact value barely matters. What does matter is which clock it reads; see the
-# frozen-notice block in emit_rows.
-preview_max_age="$(get_tmux_option @claude_preview_max_age '5m')"
+#   never | prompt   never capture a pane. Every row shows its last prompt, and
+#                    ctrl-g pulls up the live screen on demand.
+#   off | none | 0   always capture. The original behaviour.
+#   <n>[smhd]        capture only within that window (working/waiting exempt).
+#
+# `never` is the default because the age rule stops helping once enough sessions
+# are active: capturing a pane costs ~28ms per keypress against ~13ms for the
+# notice, and the ~13ms is the floor (fzf spawns one sh per row no matter what).
+# With a dozen live sessions the age rule leaves most rows capturing again and
+# the lag comes straight back. The last prompt turns out to carry more context
+# per row than a screenful of scrollback anyway — it says what the session was
+# asked to do, where the pane only shows where it happens to be sitting.
+preview_max_age="$(get_tmux_option @claude_preview_max_age 'never')"
 case "$preview_max_age" in
+never | prompt) preview_max_age=-1 ;;
 off | none) preview_max_age=0 ;;
 *d) preview_max_age=$(( ${preview_max_age%d} * 86400 )) ;;
 *h) preview_max_age=$(( ${preview_max_age%h} * 3600 )) ;;
 *m) preview_max_age=$(( ${preview_max_age%m} * 60 )) ;;
 *s) preview_max_age=${preview_max_age%s} ;;
 esac
-case "$preview_max_age" in '' | *[!0-9]*) preview_max_age=300 ;; esac
+case "$preview_max_age" in -1) ;; '' | *[!0-9]*) preview_max_age=-1 ;; esac
 
 # Whole units, largest that still reads as a round number. No fork.
 human_age() {
@@ -339,25 +348,52 @@ wrap_text() {
 # full refresh, 22ms with this half cached, 21ms with no refresh at all. So the
 # slow half accounts for essentially all of the interactive lag.
 #
-# Invalidation is on the root pid set FIRST and time only second: a created or
-# killed session changes the set and rebuilds at once, so a new session is never
-# shown untitled. The TTL only bounds how long an in-place /rename stays stale.
-TITLE_TTL=15
+# Invalidation has three keys, checked in this order:
+#
+#   1. root pid set — a created or killed session rebuilds at once, so a new
+#      session is never shown untitled.
+#   2. newest mtime across ~/.claude/sessions/*.json — this is what makes an
+#      in-session /rename show up. Claude rewrites that file on rename (and on
+#      every turn boundary), so it is an exact signal, not a heuristic.
+#   3. TTL, purely as a backstop for anything the first two miss.
+#
+# Key 2 replaced a 15s TTL that WAS the rename delay: measured 16.0s before a
+# renamed session took its new name, plus up to one 2.1s refresh on top. The
+# obvious worry is that these files churn and defeat the cache, so it was
+# measured first — over 30s, 1 of 18 files changed, once. The stat costs one
+# fork on the refresh path (never on the keystroke path).
+TITLE_TTL=120
 TITLE_CACHE="${TMPDIR:-/tmp}/tmux-claude-picker-titles.$UID"
+
+# Newest mtime across the session json files, or 0. One `stat` over the whole
+# glob and a pure-bash max — no sort/tail pipeline, which would be two more forks
+# for a comparison bash can do.
+sessions_stamp() {
+  local out m
+  STAMP=0
+  out=$(stat -f '%m' "$HOME"/.claude/sessions/*.json 2>/dev/null) || return 0
+  for m in $out; do
+    [ "$m" -gt "$STAMP" ] && STAMP=$m
+  done
+  return 0
+}
 
 # Fills $TITLES from the cache; returns 1 (miss) if absent, stale, or built for a
 # different set of sessions. Reads line-by-line rather than $(cat …) — a fork here
 # would eat a third of what the cache saves.
 load_titles() {
-  local roots="$1" now="$2" built sig line first=1
+  local roots="$1" now="$2" stamp="$3" built sig cstamp line first=1
   TITLES=''
   [ -f "$TITLE_CACHE" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$first" = 1 ]; then
       first=0
       built=${line%%$'\037'*}
+      line=${line#*$'\037'}
+      cstamp=${line%%$'\037'*}
       sig=${line#*$'\037'}
       [ "$sig" = "$roots" ] || return 1
+      [ "$cstamp" = "$stamp" ] || return 1
       case "$built" in '' | *[!0-9]*) return 1 ;; esac
       [ $((now - built)) -le "$TITLE_TTL" ] || return 1
       continue
@@ -372,9 +408,9 @@ load_titles() {
 # Written to a temp name and renamed so a concurrent picker never reads a half
 # written cache (two popups can be open on different clients).
 save_titles() {
-  local roots="$1" now="$2" body="$3" tmp="$TITLE_CACHE.$$"
+  local roots="$1" now="$2" stamp="$3" body="$4" tmp="$TITLE_CACHE.$$"
   {
-    printf '%s\037%s\n' "$now" "$roots"
+    printf '%s\037%s\037%s\n' "$now" "$stamp" "$roots"
     printf '%s' "$body"
   } >"$tmp" 2>/dev/null && mv -f "$tmp" "$TITLE_CACHE" 2>/dev/null ||
     rm -f "$tmp" 2>/dev/null
@@ -406,10 +442,11 @@ emit_rows() {
     [ -n "$root" ] && roots="$roots $root"
   done <<<"$sessions"
 
-  load_titles "$roots" "$now" || {
+  sessions_stamp
+  load_titles "$roots" "$now" "$STAMP" || {
     TITLES="$(add_prompts "$(resolve_titles "$roots")")
 "
-    save_titles "$roots" "$now" "$TITLES"
+    save_titles "$roots" "$now" "$STAMP" "$TITLES"
   }
 
   # Parallel arrays, not a herestring per row: bash 3.2 has no associative arrays
@@ -487,22 +524,23 @@ emit_rows() {
     # old and so stayed live, which is exactly backwards. @claude_state_at moves
     # only when a hook fires, i.e. on a real turn boundary.
     #
-    # working and waiting are never frozen regardless of age. A long autonomous run
-    # holds `working` with a stale stamp and is the one session you open the picker
-    # to watch, and a `waiting` pane is asking you something — reading the question
-    # is the single most useful thing the preview does.
+    # working and waiting are never frozen by AGE, for the same reason: a long
+    # autonomous run holds `working` with a stale stamp and is the one session you
+    # open the picker to watch, and a `waiting` pane is asking you something.
+    # `never` overrides even that — see the option comment.
     frozen=''; frozen_rows=0
-    if [ "$preview_max_age" -gt 0 ] && [ -n "$at" ] &&
-      [ "$state" != working ] && [ "$state" != waiting ] &&
-      [ $((now - at)) -gt "$preview_max_age" ]; then
-      human_age $((now - at)); idle_for="$HUMAN"
-      human_age "$preview_max_age"
+    if [ "$preview_max_age" -lt 0 ] ||
+      { [ "$preview_max_age" -gt 0 ] && [ -n "$at" ] &&
+        [ "$state" != working ] && [ "$state" != waiting ] &&
+        [ $((now - at)) -gt "$preview_max_age" ]; }; then
+      if [ -n "$at" ]; then human_age $((now - at)); idle_for="$HUMAN"; else idle_for='?'; fi
+      if [ "$preview_max_age" -lt 0 ]; then HUMAN=never; else human_age "$preview_max_age"; fi
       # Rows are newline delimited, so the notice carries literal \n and the
       # preview expands them with printf %b. Fixed block width: the preview is
       # ~168 columns, so wrapping to NOTICE_W keeps every line inside it and makes
       # the centring offset a constant the preview can compute without measuring
       # anything.
-      frozen="⏸  preview off · no activity in this session for $idle_for"
+      frozen="⏸  pane preview off · last turn $idle_for ago"
       frozen_rows=1
       if [ -n "$prompt" ]; then
         wrap_text "$prompt" $((NOTICE_W - 2))
@@ -516,7 +554,7 @@ emit_rows() {
           frozen_rows=$((frozen_rows + 1))
         done
       fi
-      frozen="$frozen\\n\\n@claude_preview_max_age = $HUMAN · set it to 'off' to always preview"
+      frozen="$frozen\\n\\nctrl-g: show this session's screen  ·  @claude_preview_max_age = $HUMAN"
       frozen_rows=$((frozen_rows + 2))
     fi
     pad_display "$title" 44
@@ -596,6 +634,7 @@ sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
   --preview="$PREVIEW_CMD" --preview-window='up,70%,follow' \
 	--bind="load:reload($self --list; sleep 2)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
+  --bind="ctrl-g:execute(tmux capture-pane -ept {2} -S -2000 | less -R +G)" \
   ${pos_opt[@]+"${pos_opt[@]}"} \
   ${extra_opts[@]+"${extra_opts[@]}"})
 
