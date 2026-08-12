@@ -307,10 +307,30 @@ resolve_titles() {
 #
 # python3 is optional. Without it every prompt is empty and the frozen-preview
 # notice simply omits that section — the picker itself does not depend on python.
+#
+# Each sid carries a cutoff, and it is only non-zero for a pane sitting `idle`.
+# The transcript belongs to the CONVERSATION, so `claude --resume` on the same one
+# from a second window appends its turns to the same file under the same
+# sessionId — the row then advertised a prompt this pane never saw (observed on a
+# session whose transcript ran on for 287 minutes after its own last turn). An
+# idle pane's last turn has already ended, so nothing stamped after it is its own.
+# Deliberately NOT applied to working/bg/waiting rows: @claude_state_at is frozen
+# for the length of a background-agent episode, so a prompt typed during one is
+# legitimately newer than the stamp and would be discarded.
 add_prompts() {
-  local rows="$1" sids='' line pid title sid prompts=''
+  local rows="$1" sids='' line pid title sid prompts='' live pp pstate pat cut
+  live=$(tmux list-sessions -F "#{pane_pid}$(printf '\037')#{@claude_state}$(printf '\037')#{@claude_state_at}" 2>/dev/null)
   while IFS=$'\037' read -r pid title sid; do
-    [ -n "$sid" ] && sids="$sids $sid"
+    [ -n "$sid" ] || continue
+    cut=0
+    while IFS=$'\037' read -r pp pstate pat; do
+      [ "$pp" = "$pid" ] || continue
+      # 60s of slack: a just-submitted prompt and its stamp share a moment, and
+      # the two clocks (record timestamp, date +%s) are not the same source.
+      [ "$pstate" = idle ] && [ -n "$pat" ] && cut=$((pat + 60))
+      break
+    done <<<"$live"
+    sids="$sids $sid:$cut"
   done <<<"$rows"
   if [ -n "$sids" ] && command -v python3 >/dev/null 2>&1; then
     prompts=$(python3 "$DIR/last-prompt.py" $sids 2>/dev/null)

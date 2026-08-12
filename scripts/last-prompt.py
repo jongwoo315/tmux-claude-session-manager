@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """Last thing the user typed in each session id given on argv, as "<sid>\t<text>".
 
+Arguments are "<sid>" or "<sid>:<cutoff>", cutoff being an epoch second past which
+a prompt is not this pane's. A transcript belongs to a CONVERSATION, not to a tmux
+pane, and `claude --resume` on the same conversation from a second window appends
+its turns to the same file under the same sessionId — no field in the record says
+which process wrote it, and the second process's sessions/<pid>.json is removed
+when it exits, so after the fact the timestamps are the only surviving evidence.
+The caller passes a cutoff only for a pane sitting `idle`, where its own last turn
+has already ended and nothing newer can legitimately be its own. Measured across 8
+live sessions: seven had their newest prompt 0-99 min BEFORE the pane's last state
+stamp, and the one that had been resumed elsewhere was 287 min after it.
+
 Called once per picker title-cache rebuild with every session id at once. One
 interpreter start amortised over the whole list is the point: doing this in the
 shell costs a `tail` plus a parser per session, and transcripts run to 86MB so
@@ -28,10 +39,12 @@ real instruction. Measured across the live list, exactly one session of 17 had a
 `!` as its newest input — and it was `arp -n … && curl -sS …`, which said more
 about what that session was doing than its last prose prompt did.
 """
+import calendar
 import glob
 import json
 import os
 import sys
+import time
 
 SRC = {'typed', 'queued', 'suggestion_accepted'}
 BANG_OPEN = '<bash-input>'
@@ -79,7 +92,25 @@ def from_blocks(content):
     return '[image]' if images == 1 else '[image x%d]' % images
 
 
-def last_prompt(path):
+def too_new(rec, cutoff):
+    """True if this record post-dates the pane's own last turn.
+
+    A record with no parsable timestamp is never rejected — the cutoff is a filter
+    against a known second writer, not a validity check, so an unreadable stamp
+    should leave the old behaviour in place rather than blank the row.
+    """
+    if not cutoff:
+        return False
+    ts = rec.get('timestamp')
+    if not isinstance(ts, str) or len(ts) < 19:
+        return False
+    try:
+        return calendar.timegm(time.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')) > cutoff
+    except ValueError:
+        return False
+
+
+def last_prompt(path, cutoff=0):
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -107,25 +138,28 @@ def last_prompt(path):
                 # An image attachment lands here whatever the promptSource is —
                 # the older records carry none at all.
                 found = from_blocks(text)
-                if found:
-                    return found
+            elif not isinstance(text, str):
                 continue
-            if not isinstance(text, str):
+            else:
+                text = text.strip()
+                if rec.get('promptSource') in SRC:
+                    found = ' '.join(text.split())[:MAX] if text else ''
+                else:
+                    # A `!` command has no promptSource, so it has to be recognised
+                    # by its wrapper. The tags hold only the command — its output
+                    # lands in a separate record — so stripping them leaves exactly
+                    # what was typed.
+                    if not (text.startswith(BANG_OPEN) and text.endswith(BANG_CLOSE)):
+                        continue
+                    cmd = text[len(BANG_OPEN):-len(BANG_CLOSE)].strip()
+                    found = ('! ' + ' '.join(cmd.split()))[:MAX] if cmd else ''
+            if not found:
                 continue
-            text = text.strip()
-            if rec.get('promptSource') not in SRC:
-                # A `!` command has no promptSource, so it has to be recognised by
-                # its wrapper. The tags hold only the command — its output lands
-                # in a separate record — so stripping them leaves exactly what was
-                # typed.
-                if not (text.startswith(BANG_OPEN) and text.endswith(BANG_CLOSE)):
-                    continue
-                text = text[len(BANG_OPEN):-len(BANG_CLOSE)].strip()
-                if not text:
-                    continue
-                return ('! ' + ' '.join(text.split()))[:MAX]
-            if text:
-                return ' '.join(text.split())[:MAX]
+            # Only a real candidate is worth a timestamp: strptime is expensive and
+            # the tail is overwhelmingly tool results, which never reach this line.
+            if too_new(rec, cutoff):
+                continue
+            return found
         if window >= size:
             break
     return ''
@@ -134,9 +168,14 @@ def last_prompt(path):
 def main():
     found = index_transcripts()
     out = []
-    for sid in sys.argv[1:]:
+    for arg in sys.argv[1:]:
+        sid, _, cut = arg.partition(':')
+        try:
+            cutoff = int(cut)
+        except ValueError:
+            cutoff = 0
         path = found.get(sid)
-        out.append('%s\t%s' % (sid, last_prompt(path) if path else ''))
+        out.append('%s\t%s' % (sid, last_prompt(path, cutoff) if path else ''))
     sys.stdout.write('\n'.join(out) + ('\n' if out else ''))
 
 

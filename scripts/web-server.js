@@ -105,7 +105,16 @@ function fromBlocks(content) {
   return images === 1 ? '[image]' : `[image x${images}]`
 }
 
-function scanTail(file, size, bytes) {
+// True if this record post-dates the pane's own last turn. An unparsable stamp is
+// never rejected — the cutoff filters a known second writer, it is not a validity
+// check, so a bad timestamp should leave the old behaviour rather than blank the row.
+function tooNew(o, cutoff) {
+  if (!cutoff || typeof o.timestamp !== 'string') return false
+  const t = Date.parse(o.timestamp)
+  return Number.isFinite(t) && t / 1000 > cutoff
+}
+
+function scanTail(file, size, bytes, cutoff = 0) {
   const start = Math.max(0, size - bytes)
   let buf
   try {
@@ -125,45 +134,71 @@ function scanTail(file, size, bytes) {
     try { o = JSON.parse(l) } catch { continue }
     if (o.type !== 'user' || o.isSidechain) continue
     const t = o.message && o.message.content
+    let found = ''
     if (Array.isArray(t)) {
       // An image attachment lands here whatever the promptSource is — the older
       // records carry none at all.
-      const found = fromBlocks(t)
-      if (found) return found
+      found = fromBlocks(t)
+    } else if (typeof t !== 'string' || !t.trim()) {
       continue
-    }
-    if (typeof t !== 'string' || !t.trim()) continue
-    if (!PROMPT_SRC.has(o.promptSource)) {
+    } else if (PROMPT_SRC.has(o.promptSource)) {
+      found = t.trim().replace(/\s+/g, ' ').slice(0, PROMPT_MAX)
+    } else {
       // A `!` command has no promptSource, so the wrapper is the only marker.
       // The tags hold just the command — its output is a separate record — so
       // stripping them leaves exactly what was typed.
       const s = t.trim()
       if (!s.startsWith(BANG_OPEN) || !s.endsWith(BANG_CLOSE)) continue
       const cmd = s.slice(BANG_OPEN.length, -BANG_CLOSE.length).trim()
-      if (!cmd) continue
-      return ('! ' + cmd.replace(/\s+/g, ' ')).slice(0, PROMPT_MAX)
+      if (cmd) found = ('! ' + cmd.replace(/\s+/g, ' ')).slice(0, PROMPT_MAX)
     }
-    return t.trim().replace(/\s+/g, ' ').slice(0, PROMPT_MAX)
+    if (!found) continue
+    // Only a real candidate is worth parsing a date for; the tail is
+    // overwhelmingly tool results, which never reach this line.
+    if (tooNew(o, cutoff)) continue
+    return found
   }
   return null
 }
 
-function lastPrompt(sid) {
+// Epoch second past which a prompt cannot belong to this pane, or 0 for no limit.
+// A transcript belongs to the conversation, so `claude --resume` on it from a
+// second window appends turns to the same file under the same sessionId and the
+// row starts advertising a prompt this pane never saw. Only an idle pane can be
+// judged this way — its own turn has ended — and only from the picker's age
+// column, which is whole minutes since @claude_state_at; the extra minute covers
+// that rounding plus the gap between the record clock and this one.
+function promptCutoff(row) {
+  if (row.state !== 'idle') return 0
+  const m = /^(\d+)m$/.exec((row.age || '').trim())
+  if (!m) return 0
+  return Math.floor(Date.now() / 1000) - Number(m[1]) * 60 + 60
+}
+
+function lastPrompt(row) {
+  const sid = row.sid
   if (!sid) return null
   let c = promptCache.get(sid)
   if (!c) {
-    c = { file: findTranscript(sid), mtimeMs: 0, text: null, win: 0 }
+    c = { file: findTranscript(sid), mtimeMs: 0, text: null, win: 0, key: null }
     promptCache.set(sid, c)
   }
   if (!c.file) return null
   let st
   try { st = fs.statSync(c.file) } catch { return c.text }
-  if (st.mtimeMs === c.mtimeMs) return c.text
+  // Keyed on state+age, not on the cutoff itself: the cutoff is derived from
+  // Date.now() and so drifts every poll, which would miss the cache on every
+  // pass. state+age only moves once a minute, and it is what actually changes
+  // the answer — a row going idle changes it without touching the file's mtime.
+  const key = row.state + '/' + row.age
+  if (st.mtimeMs === c.mtimeMs && key === c.key) return c.text
   c.mtimeMs = st.mtimeMs
+  c.key = key
+  const cutoff = promptCutoff(row)
 
   for (const w of TAIL_STEPS) {
     if (w < c.win) continue // start where this session needed to look last time
-    const text = scanTail(c.file, st.size, w)
+    const text = scanTail(c.file, st.size, w, cutoff)
     if (text) { c.text = text; c.win = w; return text }
     if (w >= st.size) break // whole file already scanned; nothing to find
   }
@@ -361,7 +396,7 @@ function parsePicker(out) {
     const state = (icon.split(/\s+/).pop() || '').toLowerCase()
     rows.push({
       id: f[1],
-      state: ['working', 'idle', 'waiting'].includes(state) ? state : 'unknown',
+      state: ['working', 'idle', 'waiting', 'bg'].includes(state) ? state : 'unknown',
       age: f[3].trim(),
       label: f[4].trim(),
       path: f[5].trim(),
@@ -423,7 +458,7 @@ async function snapshot() {
     attached: attached.get(r.id) === true,
     kind: tasks.has(r.id) ? 'task' : 'free',
     task: tasks.get(r.id) || null,
-    prompt: lastPrompt(r.sid),
+    prompt: lastPrompt(r),
   }))
 
   linkForks(nodes)
