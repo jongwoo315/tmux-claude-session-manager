@@ -11,7 +11,7 @@ end up with a dozen of them and no way to tell which are finished without openin
 each one. This plugin gives you:
 
 - 🔢 **A central picker** (`prefix` + `u`) listing every running Claude session.
-- 🟢 **Live status** per session — `working` / `waiting` / `idle` — driven by
+- 🟢 **Live status** per session — `working` / `waiting` / `bg` / `idle` — driven by
   Claude Code hooks, so you instantly see which need you.
 - 👁️ **A live preview** of each session's screen right in the picker.
 - 🎯 **Smart jump** — selecting a session switches your client to the window it
@@ -89,7 +89,8 @@ Inside the picker:
 | `ctrl-x`                  | Kill the highlighted session                                              |
 | `↑` / `↓`, type to filter | fzf navigation                                                            |
 
-Sessions needing your attention (`waiting`, `idle`) sort to the top.
+Sessions needing your attention (`waiting`, `idle`) sort to the top, then `bg`,
+then `working` — the ones to leave alone sit at the bottom.
 
 ## Status setup (optional, recommended)
 
@@ -152,12 +153,27 @@ Claude Code settings (`~/.claude/settings.json`), merging into any existing
 
 The state machine:
 
-| Event                            | State        | Meaning                   |
-| -------------------------------- | ------------ | ------------------------- |
-| `UserPromptSubmit`               | 🔴 `working` | Busy — leave it           |
-| `Notification` (permission)      | 🟡 `waiting` | Needs permission          |
-| `PreToolUse` (`AskUserQuestion`) | 🟡 `waiting` | Asking you a question     |
-| `Stop`                           | 🟢 `idle`    | Turn finished — your move |
+| Event                                | State        | Meaning                       |
+| ------------------------------------ | ------------ | ----------------------------- |
+| `UserPromptSubmit`                   | 🔴 `working` | Busy — leave it               |
+| `Notification` (permission)          | 🟡 `waiting` | Needs permission              |
+| `PreToolUse` (`AskUserQuestion`)     | 🟡 `waiting` | Asking you a question         |
+| `Stop`, background tasks still running | 🔵 `bg`    | Answered you; a shell or agent is still out |
+| `Stop`, nothing left running         | 🟢 `idle`    | Turn finished — your move     |
+
+`bg` is a picker-only label. The underlying `@claude_state` stays `working`, because
+external automation polls that option for "is this session done yet" and only knows
+`working`/`waiting`/`idle` — reporting `idle` while background work continues would
+let it close a task mid-flight. The picker tells the two apart with a second option,
+`@claude_bg`.
+
+That option exists because the picker cross-checks a `working` row against tmux's
+`#{window_activity}`: an ESC-interrupt fires no hook at all, so `working` would
+otherwise stick forever, and a truly busy session repaints about once a second. A
+session parked on background work stops repainting too, so the clock alone cannot
+separate them — it read those rows as `idle` and flapped them back to `working` on
+every stray repaint, reshuffling the list under `j`/`k`. `@claude_bg` answers it with
+the fact instead of a guess.
 
 > Claude Code reloads `hooks` dynamically — no restart needed. Sessions that are
 > already running start reporting status on their next event once the hooks are

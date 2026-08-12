@@ -35,6 +35,7 @@ new="${1:-idle}"
 # manual `state.sh idle` on a TTY doesn't block on cat ([ -t 0 ] true = terminal).
 subagent_stop=false
 skip_stamp=false
+bg=0
 if [ ! -t 0 ]; then
   raw=$(cat 2>/dev/null)
   # Event trace, enabled by `touch ~/.claude/state-debug` — for diagnosing missed
@@ -80,7 +81,18 @@ if [ ! -t 0 ]; then
   # gets relabelled working. That needs the box and a live agent episode at once,
   # which is rarer than what this fixes.
   # skip_stamp for the same reason as SubagentStop above — one clock per episode.
-  case "$new:$raw" in idle:*'"status":"running"'*) new=working; skip_stamp=true ;; esac
+  #
+  # bg records WHY this is working, for the picker. The distinction it needs is
+  # exactly the one this branch computes: the foreground turn is over (a Stop
+  # really did fire) and only background work keeps the session busy. The picker
+  # cross-checks `working` against tmux's repaint clock to catch ESC-interrupts,
+  # which fire no hook at all — and a session parked here has also stopped
+  # repainting, so that check cannot tell the two apart on its own and flapped
+  # the row between working and idle every time a stray repaint landed.
+  # @claude_state itself stays working: orch reads it and only understands
+  # working|waiting|idle, and a Stop-set idle here would let it close a task
+  # mid-flight (the whole reason this branch exists).
+  case "$new:$raw" in idle:*'"status":"running"'*) new=working; skip_stamp=true; bg=1 ;; esac
 fi
 
 cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
@@ -102,6 +114,11 @@ cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
 # same state), so the picker age never counts up. Same-state re-assert keeps the
 # original timestamp → age reflects time since the state actually began.
 tmux set-option -t "$session" @claude_state "$new"
+# Written on every path that gets here, so it clears itself: the next foreground
+# event (PostToolUse/UserPromptSubmit = working) or a real idle resets it to 0.
+# The early exits above leave it alone, which is right — they change no state,
+# and the picker only consults it for `working` rows.
+tmux set-option -t "$session" @claude_bg "$bg"
 [ "$new" != "$cur" ] && [ "$skip_stamp" = false ] &&
   tmux set-option -t "$session" @claude_state_at "$(date +%s)"
 exit 0

@@ -454,7 +454,7 @@ emit_rows() {
   # (unit separator), NOT tab: tab is a whitespace IFS char, so an empty middle
   # field (e.g. orch sessions have no @claude_title) would collapse and shift the
   # remaining columns. \037 never appears in a name or path.
-  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}')
+  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}\037#{@claude_bg}')
   # Filtered by tmux, not by a piped grep: -f evaluates the same prefix test
   # server-side and saves a fork per refresh (verified to select the identical 17
   # sessions). #{m:...} is a glob match, so the prefix needs a trailing *.
@@ -488,7 +488,7 @@ emit_rows() {
     T_PROMPT[${#T_PROMPT[@]}]="$prompt"
   done <<<"$TITLES"
 
-  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact; do
+  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact bg; do
     # A user ESC-interrupt ends the turn without firing ANY hook — Claude Code has
     # no interrupt event, and Stop only fires on a normal finish — so `working`
     # sticks (red) until the next prompt. Cross-check it against tmux's own
@@ -500,14 +500,25 @@ emit_rows() {
     # capture, no sampling delay. Display-only: @claude_state is left alone so
     # orch keeps reading the same value it always did.
     #
-    # 30s, not 5s. A session waiting on a background shell or agent repaints only
-    # when its elapsed-time line ticks, so it crossed a 5-second line constantly and
-    # flapped working<->idle every couple of seconds. The picker re-sorts on state,
-    # so each flap threw that row between the top and bottom of the list, and j/k
-    # landed on whatever slid underneath — read as input lag, not as reordering.
-    # The gap this discriminates is enormous (0s vs 575s+), so 30s costs nothing in
-    # detection: an ESC-interrupted session is stale by minutes, never by seconds.
-    [ "$state" = working ] && [ -n "$wact" ] && [ $((now - wact)) -gt 30 ] && state=idle
+    # A session parked on background work is stale by the same measure, so the
+    # clock alone cannot separate the two. Raising the bar does not help: it was
+    # already lifted 5s -> 30s for exactly this, and a background-parked session
+    # was then measured frozen for 432s straight — every stray repaint bought 30s
+    # of `working` and the row flapped back to idle after it, and since the picker
+    # re-sorts on state each flap threw that row between the top and bottom of the
+    # list, which reads as input lag rather than as reordering.
+    #
+    # @claude_bg settles it with the fact instead of a guess: state.sh sets it when
+    # a Stop DID fire and only background tasks kept the session working. Those
+    # rows skip the check and get their own display state below; a genuine
+    # ESC-interrupt has no flag and is still caught. (Measured 2026-08-12: after an
+    # ESC, zero hooks fire, @claude_state stays working, and window_activity stops
+    # advancing — so the check is still load-bearing.)
+    if [ "$state" = working ] && [ "$bg" = 1 ]; then
+      state=background
+    elif [ "$state" = working ] && [ -n "$wact" ] && [ $((now - wact)) -gt 30 ]; then
+      state=idle
+    fi
     # Indexed scan of the resolve_titles/cache result — no fork, no temp file.
     title=""; sid=""; i=0
     prompt=''
@@ -523,11 +534,14 @@ emit_rows() {
     [ -z "$title" ] && title="$ctitle"
     [ -z "$title" ] && title="${path##*/}"
 
+    # Label field is 7 visible columns wide in every arm; the icon glyph and the
+    # reset both sit outside it, so pad to 7 or the age column shifts.
     case "$state" in
-    waiting) icon=$'\033[33m●\033[0m waiting' rank=0 ;; # yellow - needs input
-    idle)    icon=$'\033[32m●\033[0m idle   ' rank=1 ;; # green  - done, your turn
-    working) icon=$'\033[31m●\033[0m working' rank=3 ;; # red    - busy, leave it
-    *)       icon=$'\033[90m●\033[0m   ?    ' rank=2 ;; # grey   - unknown (no hook yet)
+    waiting)    icon=$'\033[33m●\033[0m waiting' rank=0 ;; # yellow - needs input
+    idle)       icon=$'\033[32m●\033[0m idle   ' rank=1 ;; # green  - done, your turn
+    background) icon=$'\033[36m◐\033[0m bg     ' rank=2 ;; # cyan   - answered you; a shell or agent is still out
+    working)    icon=$'\033[31m●\033[0m working' rank=4 ;; # red    - busy, leave it
+    *)          icon=$'\033[90m●\033[0m   ?    ' rank=3 ;; # grey   - unknown (no hook yet)
     esac
     if [ -n "$at" ]; then ago="$(((now - at) / 60))m"; else ago='-'; fi
     # rank \t session \t icon \t age \t title(padded) \t path. Title is space-
