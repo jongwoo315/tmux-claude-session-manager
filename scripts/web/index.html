@@ -10,6 +10,11 @@
     --fg: #e6edf3; --dim: #8b949e;
     --working: #f85149; --idle: #3fb950; --waiting: #d29922;
     --unknown: #8b949e; --dispatcher: #a371f7;
+    /* Foreground turn finished, a shell or agent still out. Blue, not the
+       terminal's cyan: --fork already owns cyan here, and a cyan dot would
+       read as "this node is a fork". The picker has no blue worth reading on
+       a dark background, so the two surfaces differ on purpose. */
+    --bgwork: #58a6ff;
     /* Cyan, not another purple: --dispatcher already owns purple for orch, and a
        fork edge crossing an orch edge in the same hue reads as one relation. */
     --fork: #39c5cf;
@@ -98,6 +103,7 @@
         <span><i class="dot" style="background:var(--working)"></i>working</span>
         <span><i class="dot" style="background:var(--idle)"></i>idle</span>
         <span><i class="dot" style="background:var(--waiting)"></i>waiting</span>
+        <span><i class="dot" style="background:var(--bgwork)"></i>bg</span>
         <span><i class="dot" style="background:var(--unknown)"></i>dormant</span>
         <span><i class="dot" style="background:var(--dispatcher)"></i>orch task</span>
       </span>
@@ -110,13 +116,15 @@
   </header>
   <canvas id="c"></canvas>
   <footer>
-    <b>Order</b> matches the tmux picker: waiting → idle → unknown → working, then
+    <b>Order</b> matches the tmux picker: waiting → idle → bg → unknown → working, then
     freshest first. A busy session sinks to the bottom — it is the one to leave alone.<br>
     <b>Brightness</b> falls off with idle time: a dim dot has sat untouched for days.
     Grey <b>dormant</b> sessions have no elapsed time at all — never resumed, so no
     state hook has ever timestamped them. A working session never dims; its clock
     counts time busy, not time idle.<br>
-    A <b>throbbing</b> dot just handed back — working → idle or working → waiting —
+    A <b style="color:var(--bgwork)">bg</b> session answered you and then kept a shell or background agent running; its
+    clock counts from the start of that stretch.<br>
+    A <b>throbbing</b> dot just handed back — working → idle, → waiting or → bg —
     and fades over five minutes, or stops the moment you attach — a session with the
     white ring is already on your screen, so there is nothing left to flag.<br>
     An <b style="color:var(--dispatcher)">orch task</b> has a purple core ringed in
@@ -136,7 +144,7 @@
 'use strict'
 const COLOR = {
   working: '#f85149', idle: '#3fb950', waiting: '#d29922',
-  unknown: '#8b949e', dispatcher: '#a371f7',
+  unknown: '#8b949e', dispatcher: '#a371f7', bg: '#58a6ff', // bg: keep in sync with --bgwork
 }
 const FORK_COLOR = '#39c5cf' // keep in sync with --fork
 // U+2442 OCR FORK. Menlo has no glyph for it, so the stack falls through to Apple
@@ -241,8 +249,8 @@ function targetH() {
 // picker deliberately sinks `working` to the bottom: a busy session is the one you
 // should leave alone, while `waiting` is blocked on you and `idle` is your turn.
 // Age ascending floats the just-finished to the top of each group.
-const RANK = { waiting: 0, idle: 1, working: 3 }
-const RANK_OTHER = 2 // unknown / no state hook yet
+const RANK = { waiting: 0, idle: 1, bg: 2, working: 4 }
+const RANK_OTHER = 3 // unknown / no state hook yet
 function rankOf(n) { return RANK[n.state] ?? RANK_OTHER }
 // "9868m" -> 9868; "-" and "" -> 0, matching `sort -n` on the picker's age column.
 function ageMin(n) { const m = /^(\d+)m$/.exec(n.age || ''); return m ? Number(m[1]) : 0 }
@@ -294,11 +302,12 @@ function clip(text, max) {
 // break, which is exactly the absence the pulse exists to cover.
 const DONE_PULSE_MS = 300000
 
-// working -> idle (turn finished) and working -> waiting (needs permission, or is
-// asking a question) both mean the session wants you. Listed explicitly rather than
+// working -> idle (turn finished), working -> waiting (needs permission, or is
+// asking a question) and working -> bg (answered, but a shell or agent is still
+// out) all mean the session wants you. Listed explicitly rather than
 // "anything but working": working -> unknown just means the hooks went quiet, which
 // is not a handback and should not ring.
-const PULSE_TO = new Set(['idle', 'waiting'])
+const PULSE_TO = new Set(['idle', 'waiting', 'bg'])
 
 function upsert(id, data) {
   let n = nodes.get(id)

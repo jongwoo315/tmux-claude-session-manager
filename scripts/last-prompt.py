@@ -17,7 +17,7 @@ interpreter start amortised over the whole list is the point: doing this in the
 shell costs a `tail` plus a parser per session, and transcripts run to 86MB so
 the file cannot simply be read.
 
-The record test matches web-server.js. Three things count as typed:
+The record test matches web-server.js. Five things count as the user speaking:
 
   * a prompt — type "user", not a sidechain (subagent) turn, string content, and
     a promptSource of typed/queued/suggestion_accepted.
@@ -28,6 +28,10 @@ The record test matches web-server.js. Three things count as typed:
     `[Image #N]` placeholder already inlined, so joining them reproduces what the
     TUI shows. An image dropped with nothing typed leaves no text block at all;
     that gets a synthesised `[image]`.
+  * an AskUserQuestion answer — a tool_result whose toolUseResult carries the
+    picks. See from_answers.
+  * a prompt typed while Claude was busy — an `attachment` record, never re-emitted
+    as a `user` one. See from_queued.
 
 Everything else that arrives as type "user" is machinery: tool results (also list
 content — told apart by the `tool_result` block), system-reminders, slash-command
@@ -92,6 +96,51 @@ def from_blocks(content):
     return '[image]' if images == 1 else '[image x%d]' % images
 
 
+def from_answers(rec):
+    """What the user picked in an AskUserQuestion box, or ''.
+
+    The answer arrives as a tool_result, so it looks like machinery, but it is the
+    user speaking — and a session driven by question boxes has no typed prompt for
+    as long as that lasts, which left the row advertising something hours stale.
+    toolUseResult carries the picks structured (answers maps question -> label);
+    each question's short `header` is prefixed so a bare list of labels does not
+    float without its subject.
+    """
+    tur = rec.get('toolUseResult')
+    if not isinstance(tur, dict):
+        return ''
+    answers = tur.get('answers')
+    if not isinstance(answers, dict) or not answers:
+        return ''
+    headers = {}
+    for q in tur.get('questions') or []:
+        if isinstance(q, dict) and q.get('question'):
+            headers[q['question']] = q.get('header') or ''
+    parts = []
+    for question, answer in answers.items():
+        head = headers.get(question, '')
+        parts.append('%s: %s' % (head, answer) if head else str(answer))
+    return ' · '.join(' '.join(p.split()) for p in parts)[:MAX]
+
+
+def from_queued(rec):
+    """A prompt typed while Claude was busy, or ''.
+
+    A queued prompt is never re-emitted as a `user` record — it exists only as this
+    attachment plus a pair of queue-operation entries — so the filters above walk
+    straight past a turn the user really did type. `commandMode` separates it from
+    the harness queueing its own work: across 115 of these, all 107
+    "task-notification" ones were machine text and all 8 "prompt" ones were human.
+    """
+    att = rec.get('attachment') or {}
+    if att.get('type') != 'queued_command' or att.get('commandMode') != 'prompt':
+        return ''
+    text = att.get('prompt')
+    if not isinstance(text, str) or not text.strip():
+        return ''
+    return ' '.join(text.split())[:MAX]
+
+
 def too_new(rec, cutoff):
     """True if this record post-dates the pane's own last turn.
 
@@ -131,13 +180,23 @@ def last_prompt(path, cutoff=0):
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if rec.get('type') != 'user' or rec.get('isSidechain'):
+            kind = rec.get('type')
+            if kind == 'attachment':
+                found = from_queued(rec)
+                if not found:
+                    continue
+                if too_new(rec, cutoff):
+                    continue
+                return found
+            if kind != 'user' or rec.get('isSidechain'):
                 continue
             text = (rec.get('message') or {}).get('content')
             if isinstance(text, list):
                 # An image attachment lands here whatever the promptSource is —
-                # the older records carry none at all.
-                found = from_blocks(text)
+                # the older records carry none at all. An AskUserQuestion answer
+                # is a tool_result, so it has to be recognised before from_blocks
+                # rejects the whole list as machinery.
+                found = from_answers(rec) or from_blocks(text)
             elif not isinstance(text, str):
                 continue
             else:

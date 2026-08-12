@@ -108,6 +108,40 @@ function fromBlocks(content) {
 // True if this record post-dates the pane's own last turn. An unparsable stamp is
 // never rejected — the cutoff filters a known second writer, it is not a validity
 // check, so a bad timestamp should leave the old behaviour rather than blank the row.
+// What the user picked in an AskUserQuestion box, or ''. The answer arrives as a
+// tool_result so it looks like machinery, but it is the user speaking — and a
+// session driven by question boxes has no typed prompt for as long as that lasts,
+// which left the row advertising something hours stale. Each question's short
+// header is prefixed so a bare list of labels does not float without its subject.
+function fromAnswers(o) {
+  const tur = o.toolUseResult
+  if (!tur || typeof tur !== 'object') return ''
+  const answers = tur.answers
+  if (!answers || typeof answers !== 'object') return ''
+  const headers = new Map()
+  for (const q of Array.isArray(tur.questions) ? tur.questions : []) {
+    if (q && q.question) headers.set(q.question, q.header || '')
+  }
+  const parts = []
+  for (const [question, answer] of Object.entries(answers)) {
+    const head = headers.get(question) || ''
+    parts.push(String(head ? `${head}: ${answer}` : answer).replace(/\s+/g, ' '))
+  }
+  return parts.join(' · ').slice(0, PROMPT_MAX)
+}
+
+// A prompt typed while Claude was busy, or ''. It is never re-emitted as a `user`
+// record — it exists only as this attachment plus a pair of queue-operation
+// entries — so the other filters walk straight past a turn the user really typed.
+// commandMode separates it from the harness queueing its own work: across 115 of
+// these, all 107 "task-notification" were machine text and all 8 "prompt" human.
+function fromQueued(o) {
+  const a = o.attachment
+  if (!a || a.type !== 'queued_command' || a.commandMode !== 'prompt') return ''
+  if (typeof a.prompt !== 'string' || !a.prompt.trim()) return ''
+  return a.prompt.trim().replace(/\s+/g, ' ').slice(0, PROMPT_MAX)
+}
+
 function tooNew(o, cutoff) {
   if (!cutoff || typeof o.timestamp !== 'string') return false
   const t = Date.parse(o.timestamp)
@@ -132,13 +166,19 @@ function scanTail(file, size, bytes, cutoff = 0) {
     if (!l || l[0] !== '{') continue
     let o
     try { o = JSON.parse(l) } catch { continue }
+    if (o.type === 'attachment') {
+      const queued = fromQueued(o)
+      if (!queued || tooNew(o, cutoff)) continue
+      return queued
+    }
     if (o.type !== 'user' || o.isSidechain) continue
     const t = o.message && o.message.content
     let found = ''
     if (Array.isArray(t)) {
       // An image attachment lands here whatever the promptSource is — the older
-      // records carry none at all.
-      found = fromBlocks(t)
+      // records carry none at all. An AskUserQuestion answer is a tool_result, so
+      // it has to be recognised before fromBlocks rejects the list as machinery.
+      found = fromAnswers(o) || fromBlocks(t)
     } else if (typeof t !== 'string' || !t.trim()) {
       continue
     } else if (PROMPT_SRC.has(o.promptSource)) {
