@@ -45,11 +45,14 @@ const ANSI = /\x1b\[[0-9;]*m/g
 //     content, not isSidechain (that marks a subagent turn).
 //   * a `!` shell command — promptSource null and the content wrapped in
 //     <bash-input>. Reported with a leading "! ".
+//   * a prompt with an attached image — content is a list holding an `image`
+//     block. See fromBlocks below.
 //
-// The far more numerous tool-result entries are also type "user" but carry list
-// content and no promptSource; system-reminders, slash-command expansions and
-// task notifications are strings that fail both tests. In a 17-session sample
-// those were 1440 of 1633 user records, which is what this filter is really for.
+// The far more numerous tool-result entries are also type "user" and also carry
+// list content, told apart by their `tool_result` block; system-reminders,
+// slash-command expansions and task notifications are strings that fail every
+// test. In a 17-session sample those were 1440 of 1633 user records, which is
+// what this filter is really for.
 //
 // Transcripts reach tens of megabytes, so only the tail is read, and only when
 // the file's mtime has moved. The path lookup is cached too — finding it means
@@ -79,6 +82,29 @@ function findTranscript(sid) {
   return null
 }
 
+// What the user typed in a list-content record, or '' if it wasn't them. Only an
+// image attachment puts their own words in a list; a tool_result block means
+// machinery, and a bare text list is a slash-command expansion or a system-
+// reminder — so an image block is what makes the record a prompt. The text
+// blocks already carry the [Image #N] placeholder inline, so joining them
+// reproduces what the TUI showed. An image dropped with nothing typed leaves no
+// text block at all.
+function fromBlocks(content) {
+  const kinds = new Set()
+  const texts = []
+  let images = 0
+  for (const b of content) {
+    if (!b || typeof b !== 'object') continue
+    kinds.add(b.type)
+    if (b.type === 'text') {
+      if (typeof b.text === 'string' && b.text.trim()) texts.push(b.text.trim().replace(/\s+/g, ' '))
+    } else if (b.type === 'image') images++
+  }
+  if (images === 0 || kinds.has('tool_result')) return ''
+  if (texts.length) return texts.join(' ').slice(0, PROMPT_MAX)
+  return images === 1 ? '[image]' : `[image x${images}]`
+}
+
 function scanTail(file, size, bytes) {
   const start = Math.max(0, size - bytes)
   let buf
@@ -99,6 +125,13 @@ function scanTail(file, size, bytes) {
     try { o = JSON.parse(l) } catch { continue }
     if (o.type !== 'user' || o.isSidechain) continue
     const t = o.message && o.message.content
+    if (Array.isArray(t)) {
+      // An image attachment lands here whatever the promptSource is — the older
+      // records carry none at all.
+      const found = fromBlocks(t)
+      if (found) return found
+      continue
+    }
     if (typeof t !== 'string' || !t.trim()) continue
     if (!PROMPT_SRC.has(o.promptSource)) {
       // A `!` command has no promptSource, so the wrapper is the only marker.
