@@ -19,6 +19,9 @@ each one. This plugin gives you:
 - 🚀 **A launcher** (`prefix` + `y`) that opens/attaches a Claude session for the
   current directory.
 - ❌ **Quick kill** (`ctrl-x`) of finished sessions from the picker.
+- ♻️ **Bulk restart** (`prefix` + `A`) that kills every session and brings each
+  one back with `claude --resume <id>` — for picking up a Claude CLI upgrade
+  without losing a single conversation.
 
 Status is optional: without the hooks the picker still lists, previews, jumps,
 and kills — sessions just show `?` instead of a color.
@@ -68,10 +71,43 @@ run-shell ~/clone/path/claude_session_manager.tmux
 | `prefix` + `F` | Fork a past conversation into a new session (fresh ID, original untouched)      |
 | `prefix` + `u` | Open the session picker                                                         |
 | `prefix` + `b` | Jump straight back to the last attached session, skipping the picker            |
+| `prefix` + `A` | Restart **every** session, resuming each transcript (after a Claude upgrade)    |
 
 `Y`, `R` and `F` all create a session named `claude-<hash>[-N]`, so every one of
 them shows up in the picker. They differ only in what Claude is told to do on
 attach: start clean, resume in place, or fork.
+
+### Restarting every session after a Claude upgrade
+
+A running session keeps the Claude binary it started with, so a CLI upgrade only
+takes effect on restart — and restarting by hand means killing a dozen sessions
+and remembering which transcript each one held.
+
+`prefix` + `A` asks for confirmation, then for every session: kills it and
+recreates it under the **same tmux name, directory, title and origin window**,
+running `claude --resume <sessionId>`. The id comes from the picker's own
+snapshot, so no interactive transcript picker appears.
+
+It is deliberately all-or-nothing, and refuses to run when:
+
+- **any session is `working` / `waiting` / `bg`** (orch sessions included) —
+  killing a pane mid-turn drops whatever that turn had not yet flushed to the
+  transcript, and `--resume` replays only what was written;
+- **a client is attached to a Claude session** — that session is about to be
+  killed under you. Close the popup and run it from a plain tmux window.
+
+Both refusals print the offending sessions and wait for a keypress.
+
+Run it from a normal window, not from inside a session popup. After the
+restarts it waits for each pane to paint before reporting done — a pane opened
+mid-boot looks blank, which reads as a broken session in the picker.
+
+The script is usable directly, where it defaults to a dry run:
+
+```sh
+~/.tmux/plugins/tmux-claude-session-manager/scripts/restart-all.sh        # show the plan
+~/.tmux/plugins/tmux-claude-session-manager/scripts/restart-all.sh --go   # do it
+```
 
 `R` and `F` run `claude --resume` with no session ID, so Claude's own transcript
 picker opens on first attach and you choose the conversation there.
@@ -259,6 +295,8 @@ set -g @claude_resume_key     'R'        # prefix key: resume a past conversatio
 set -g @claude_fork_key       'F'        # prefix key: fork a past conversation
 set -g @claude_list_key       'u'        # prefix key: open the picker
 set -g @claude_last_key       'b'        # prefix key: jump back to last session
+set -g @claude_restart_key    'A'        # prefix key: restart every session with --resume
+set -g @claude_restart_wait    60        # seconds to wait for panes to paint after a restart
 set -g @claude_command        'claude'   # command run in new sessions
 set -g @claude_args           ''         # extra args appended to the command
 set -g @claude_session_prefix 'claude-'  # tmux session name prefix
