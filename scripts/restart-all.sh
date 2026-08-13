@@ -41,7 +41,10 @@ center_block() {
   # a 50-row popup instead of centring it.
   # …and it must read /dev/tty, not stdin: stdin here is the pipe carrying the
   # message, so a bare `stty size` sees a pipe and reports nothing.
-  read -r lines cols < <(stty size < /dev/tty 2>/dev/null || echo '')
+  # Guard the open: without a controlling tty (a hook or cron run) bash itself
+  # prints "/dev/tty: Device not configured" before stty's 2>/dev/null applies,
+  # and that noise is now permanent in the log.
+  read -r lines cols < <({ [ -r /dev/tty ] && stty size < /dev/tty; } 2>/dev/null || echo '')
   [ -n "${lines:-}" ] || lines="$(tput lines 2>/dev/null || echo 24)"
   [ -n "${cols:-}" ]  || cols="$(tput cols  2>/dev/null || echo 80)"
   n="$(printf '%s\n' "$text" | wc -l | tr -d ' ')"
@@ -64,7 +67,7 @@ center_block() {
 TERM_COLS=''
 term_cols() {
   [ -n "$TERM_COLS" ] && { printf '%s' "$TERM_COLS"; return; }
-  read -r _ TERM_COLS < <(stty size < /dev/tty 2>/dev/null || echo '')
+  read -r _ TERM_COLS < <({ [ -r /dev/tty ] && stty size < /dev/tty; } 2>/dev/null || echo '')
   [ -n "$TERM_COLS" ] || TERM_COLS="$(tput cols 2>/dev/null || echo 80)"
   printf '%s' "$TERM_COLS"
 }
@@ -85,11 +88,32 @@ center_line() {
   printf '%*s%s\n' "$(( (cols - w) / 2 < 0 ? 0 : (cols - w) / 2 ))" '' "$text"
 }
 
+# Everything below goes to a log as well as the popup. The popup's pty is
+# destroyed the moment it closes, so the ✓/✗ lines are unrecoverable a second
+# later — which is exactly why the 08-13 wipe had to be diagnosed backwards from
+# file mtimes. Dry runs are logged too: the aborted dry run 30s before that wipe
+# turned out to be the useful piece of evidence.
+# Not under ~/.claude — that is a public git repo and these lines carry
+# directory paths and session labels.
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-claude-session-manager"
+log="$cache_dir/restart.log"
+if mkdir -p "$cache_dir" 2>/dev/null && : >> "$log" 2>/dev/null; then
+  chmod 600 "$log" 2>/dev/null
+  # Trim before appending so the file cannot grow without bound.
+  if [ "$(wc -l < "$log" 2>/dev/null || echo 0)" -gt 2000 ]; then
+    tail -n 1000 "$log" > "$log.tmp" 2>/dev/null && mv "$log.tmp" "$log"
+  fi
+  printf '\n===== %s  restart-all.sh %s =====\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" "${*:-<no args: dry run>}" >> "$log"
+  # tee's own stdout is the popup, captured before this redirect takes effect.
+  exec > >(tee -a "$log") 2>&1
+fi
+
 hold_open() {
   [ "$pause" = true ] || return 0
   printf '\n'
   center_line '[any key to close]'
-  read -rsn1 < /dev/tty
+  [ -r /dev/tty ] && read -rsn1 < /dev/tty
 }
 trap hold_open EXIT
 
@@ -162,9 +186,8 @@ fi
 # from — only the transcript on disk, which knows neither the label nor the
 # window it was launched from. Not in ~/.claude: that is a public git repo and
 # these rows carry directory paths and session labels.
-snap_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-claude-session-manager"
-mkdir -p "$snap_dir" 2>/dev/null
-snap="$snap_dir/restart-plan.tsv"
+mkdir -p "$cache_dir" 2>/dev/null
+snap="$cache_dir/restart-plan.tsv"
 if printf '%s' "$plan" > "$snap.tmp" 2>/dev/null && mv "$snap.tmp" "$snap" 2>/dev/null; then
   chmod 600 "$snap" 2>/dev/null
   printf '\nPlan saved to %s\n' "$snap"
