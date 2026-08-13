@@ -156,10 +156,37 @@ if [ "$go" = false ]; then
   exit 0
 fi
 
+# Snapshot the plan to disk BEFORE the first kill. Session name, title and
+# origin live only in the tmux server's memory: once a session is killed they
+# are gone, and if the recreate does not land there is nothing left to rebuild
+# from — only the transcript on disk, which knows neither the label nor the
+# window it was launched from. Not in ~/.claude: that is a public git repo and
+# these rows carry directory paths and session labels.
+snap_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-claude-session-manager"
+mkdir -p "$snap_dir" 2>/dev/null
+snap="$snap_dir/restart-plan.tsv"
+if printf '%s' "$plan" > "$snap.tmp" 2>/dev/null && mv "$snap.tmp" "$snap" 2>/dev/null; then
+  chmod 600 "$snap" 2>/dev/null
+  printf '\nPlan saved to %s\n' "$snap"
+else
+  { printf '⛔ Aborted — could not write the recovery snapshot to\n'
+    printf '%s\n\n' "$snap"
+    printf 'Without it a failed recreate loses the session labels for good.\n'
+  } | center_block
+  exit 1
+fi
+
 printf '\n'
 fail=0
+aborted=''
 while IFS=$'\t' read -r session path sid title origin; do
   [ -n "$session" ] || continue
+  # Stop killing the moment a recreate fails. The old behaviour carried on
+  # down the list, so one broken recreate cost every remaining session too.
+  if [ -n "$aborted" ]; then
+    printf '  · %s — left running (aborted)\n' "$session"
+    continue
+  fi
   # Reuse the user's configured command verbatim so wrappers survive (their
   # resume command is `printf '\033[5 q'; exec claude --resume …`, so the binary
   # is NOT the first word — splitting on whitespace would break it).
@@ -172,18 +199,47 @@ while IFS=$'\t' read -r session path sid title origin; do
   else
     cmd="$launch_cmd"
   fi
-  tmux kill-session -t "$session" 2>/dev/null
-  if tmux new-session -d -s "$session" -c "$path" "$cmd"; then
+  # A directory that no longer exists makes new-session fail *after* the kill,
+  # so check before doing anything destructive.
+  if [ ! -d "$path" ]; then
+    printf '  ✗ %s — cwd is gone: %s (not touched)\n' "$session" "$path" >&2
+    fail=$((fail + 1)); aborted="$session"
+    continue
+  fi
+
+  tmux kill-session -t "=$session" 2>/dev/null
+  # Recreate, verify it actually landed, retry once. `new-session` exiting 0 is
+  # not proof, and neither is an immediate has-session: a command that dies on
+  # start still leaves the session visible for about a second before tmux reaps
+  # it. Settle first, then ask.
+  ok=false
+  for attempt in 1 2; do
+    tmux new-session -d -s "$session" -c "$path" "$cmd" 2>/dev/null
+    sleep "$(get_tmux_option @claude_restart_settle 2)"
+    if tmux has-session -t "=$session" 2>/dev/null; then ok=true; break; fi
+    [ "$attempt" = 1 ] && printf '  ↻ %s — died on start, retrying\n' "$session"
+  done
+
+  if [ "$ok" = true ]; then
     [ -n "$origin" ] && tmux set-option -t "$session" @claude_origin "$origin"
     [ -n "$title" ]  && tmux set-option -t "$session" @claude_title "$title"
     printf '  ✓ %s\n' "$session"
   else
-    printf '  ✗ %s — failed to recreate\n' "$session" >&2
-    fail=$((fail + 1))
+    printf '  ✗ %s — failed to recreate (twice) — stopping here\n' "$session" >&2
+    fail=$((fail + 1)); aborted="$session"
   fi
 done <<< "$plan"
 
 printf '\n%s restarted, %s failed.\n' "$((total - fail))" "$fail"
+
+if [ -n "$aborted" ]; then
+  { printf '\n⛔ Stopped at %s. Sessions below it were left alone.\n\n' "$aborted"
+    printf 'Rebuild anything missing from the snapshot:\n'
+    printf '  %s\n' "$snap"
+    printf '(columns: session, cwd, sessionId, title, origin)\n'
+  } | center_block
+  exit 1
+fi
 
 # Claude needs a few seconds to boot and replay the transcript; a pane opened
 # before that is blank, which reads as a broken session in the picker. Wait for
