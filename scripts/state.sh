@@ -44,6 +44,15 @@ if [ ! -t 0 ]; then
     ev=$(printf '%s' "$raw" | /usr/bin/grep -oE '"hook_event_name":"[^"]*"' | head -1)
     printf '%s %s %s %s\n' "$(date +%H:%M:%S)" "$session" "$new" "${ev:-no-event}" >> "$HOME/.claude/state-debug.log"
   fi
+  # Raw payload capture, enabled by `touch ~/.claude/state-debug-raw`. Stop events
+  # only — the others fire far too often to keep. For checking what a hook actually
+  # receives (e.g. whether background_tasks lists a running shell).
+  if [ -e "$HOME/.claude/state-debug-raw" ]; then
+    case "$raw" in *'"hook_event_name":"Stop"'*)
+      printf '%s %s %s %s\n' "$(date +%H:%M:%S)" "$session" "$new" "$raw" \
+        >> "$HOME/.claude/state-raw.log" ;;
+    esac
+  fi
   # EXCEPT SubagentStop: a finished background agent re-invokes the PARENT loop
   # (it synthesizes the result with no prompt and often no tool call), so no
   # working-stamping hook would otherwise fire — the picker sat on the Stop-set
