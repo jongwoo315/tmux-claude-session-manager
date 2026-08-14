@@ -41,8 +41,11 @@ const ANSI = /\x1b\[[0-9;]*m/g
 // A transcript is ~/.claude/projects/<slug>/<sessionId>.jsonl. Two record shapes
 // count as typed, and scripts/last-prompt.py applies the same two:
 //
-//   * a prompt — promptSource "typed" | "queued" | "suggestion_accepted", string
-//     content, not isSidechain (that marks a subagent turn).
+//   * a prompt — promptSource "typed" | "queued" | "suggestion_accepted" | "sdk",
+//     string content, not isSidechain (that marks a subagent turn). "sdk" is the
+//     launch prompt of a headless session (orch ralph loops, cron jobs) and is the
+//     only thing those are ever asked; "system" stays out, those are
+//     <task-notification> blocks rather than anything a person wrote.
 //   * a `!` shell command — promptSource null and the content wrapped in
 //     <bash-input>. Reported with a leading "! ".
 //   * a prompt with an attached image — content is a list holding an `image`
@@ -57,7 +60,7 @@ const ANSI = /\x1b\[[0-9;]*m/g
 // Transcripts reach tens of megabytes, so only the tail is read, and only when
 // the file's mtime has moved. The path lookup is cached too — finding it means
 // stat-ing one candidate per project directory.
-const PROMPT_SRC = new Set(['typed', 'queued', 'suggestion_accepted'])
+const PROMPT_SRC = new Set(['typed', 'queued', 'suggestion_accepted', 'sdk'])
 const BANG_OPEN = '<bash-input>'
 const BANG_CLOSE = '</bash-input>'
 // Escalating windows. 256KB covers a session you have typed in recently, but a

@@ -20,7 +20,11 @@ the file cannot simply be read.
 The record test matches web-server.js. Five things count as the user speaking:
 
   * a prompt — type "user", not a sidechain (subagent) turn, string content, and
-    a promptSource of typed/queued/suggestion_accepted.
+    a promptSource of typed/queued/suggestion_accepted/sdk. `sdk` is the launch
+    prompt of a headless session (orch ralph loops, cron jobs); it is the only
+    thing those sessions are ever asked, so without it they show no prompt at
+    all. `system` is excluded — those are <task-notification> blocks, not words
+    anyone wrote.
   * a `!` shell command — same but promptSource is null and the content is
     wrapped in <bash-input>. Reported with a leading "! ".
   * a prompt with an attached image — content is a list holding an `image` block.
@@ -50,7 +54,7 @@ import os
 import sys
 import time
 
-SRC = {'typed', 'queued', 'suggestion_accepted'}
+SRC = {'typed', 'queued', 'suggestion_accepted', 'sdk'}
 BANG_OPEN = '<bash-input>'
 BANG_CLOSE = '</bash-input>'
 # Escalating tail windows. 256KB covers a session typed in recently; a long
