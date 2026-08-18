@@ -21,6 +21,11 @@
 # @claude_state_at is stamped on real state TRANSITIONS only, which is exactly the
 # handback instant. A session re-asserting the same state keeps its old timestamp,
 # so a long working stretch cannot masquerade as a fresh handback.
+# colour16, not black: the status bar is bg=green,fg=black, and iTerm2 draws bold
+# text in bright colours by default — `fg=black,bold` would come out bright black
+# (grey) on green, fainter than the plain text it was meant to strengthen. The
+# bright remap only covers the basic 8 colours, so the 256-palette black is bold
+# without being lightened. #[default] restores the bar style, attributes included.
 set -uo pipefail
 
 DONE_WINDOW=300
@@ -35,8 +40,8 @@ tmux list-sessions \
       # An empty $2 becomes 0, which is always outside the window.
       $1 == "idle" && $3 == 0 && now - ($2 + 0) < win { d++ }
       END {
-        if (w) printf "#[fg=black]⏳ %d waiting #[default]", w
+        if (w) printf "#[fg=colour16,bold]⏳ %d waiting #[default]", w
         if (w && d) printf " "
-        if (d) printf "#[fg=black]✅ %d done #[default]", d
+        if (d) printf "#[fg=colour16,bold]✅ %d done #[default]", d
       }'
 exit 0
