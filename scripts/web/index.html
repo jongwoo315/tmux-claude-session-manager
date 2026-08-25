@@ -25,8 +25,8 @@
     background: var(--bg); color: var(--fg);
     /* Scrolls only when the block is taller than the window. */
     overflow-y: auto; overflow-x: hidden;
-    font: 13px/1.5 -apple-system, "SF Pro Text", "Apple SD Gothic Neo",
-          "Noto Sans KR", system-ui, sans-serif;
+    font: 13px/1.5 "SF Pro Text", "Apple SD Gothic Neo",
+          "Noto Sans KR", sans-serif;
     /* Centre the whole figure in the window. `margin: auto` on the child rather
        than `align-items: center`, because auto margins stop at the top edge when
        the content outgrows the viewport — centring would push the header off
@@ -465,11 +465,16 @@ function layout() {
   else layoutTree()
 }
 
+// Label font is named outright rather than left to `-apple-system`: Chrome
+// resolves that keyword to plain SF, Firefox to `system-ui`, and the system-ui
+// cut carries UI tracking that runs 16% wider (87.95px vs 75.90px for the same
+// string at 600 12px). Layout scales off measureText, so that gap moved the
+// whole tree, not just the labels.
 // Width a node's text actually occupies, so columns can be sized to content.
 function textWidth(n) {
   if (n.kind === 'root') { ctx.font = `600 ${11 * S}px ui-monospace, Menlo, monospace`; return ctx.measureText('CLAUDE').width }
   if (n.kind === 'group') { ctx.font = `600 ${12 * S}px ui-monospace, Menlo, monospace`; return ctx.measureText(n.label).width }
-  ctx.font = `600 ${12 * S}px -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif`
+  ctx.font = `600 ${12 * S}px "SF Pro Text", "Apple SD Gothic Neo", sans-serif`
   let w = ctx.measureText(n.label || n.id).width
   if (n.age && n.age !== '-') {
     ctx.font = `${11 * S}px ui-monospace, Menlo, monospace`
@@ -814,7 +819,7 @@ function draw() {
     const ageW = age ? ctx.measureText(age).width + 10 * S : 0
 
     ctx.fillStyle = '#e6edf3'
-    ctx.font = `600 ${12 * S}px -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif`
+    ctx.font = `600 ${12 * S}px "SF Pro Text", "Apple SD Gothic Neo", sans-serif`
     const label = clip(n.label || n.id, room - r - ageW)
     ctx.fillText(label, tx, n.y)
     tx += dir * (ctx.measureText(label).width + 10 * S)
