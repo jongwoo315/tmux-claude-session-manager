@@ -320,8 +320,9 @@ function headOf(sid) {
   if (hit) return hit
   const file = findTranscript(sid)
   if (!file) return null // transcript not written yet — retry on the next poll
-  let size = 0
-  try { size = fs.statSync(file).size } catch { /* treat as unknown */ }
+  let st = null
+  try { st = fs.statSync(file) } catch { /* treat as unknown */ }
+  const size = st ? st.size : 0
   let parsed = null
   for (const w of HEAD_STEPS) {
     parsed = readHead(file, w)
@@ -337,9 +338,16 @@ function headOf(sid) {
   // INSIDE the transcript is fixed when the conversation starts and survives
   // resume, copy and rsync. birthtimeMs stays only as a fallback for a head with
   // no timestamped record yet.
-  let birth = parsed.startedAt
-  if (!birth) { try { birth = fs.statSync(file).birthtimeMs } catch { birth = 0 } }
-  const h = { ...parsed, file, dir: path.dirname(file), birth }
+  //
+  // birthtimeMs is kept as fileBirth for one job only: breaking a birth TIE. A fork
+  // of an uncompacted parent copies the parent's first records verbatim, timestamps
+  // included, so the two births come out EQUAL and the ordering signal says nothing.
+  // The file, though, is created when the fork is — so within a tie it orders them.
+  // The resume hazard above is confined to that tie, and forkCache freezes the first
+  // answer, so a later resume of the parent cannot flip an edge already drawn.
+  const fileBirth = st ? st.birthtimeMs : 0
+  const birth = parsed.startedAt || fileBirth
+  const h = { ...parsed, file, dir: path.dirname(file), birth, fileBirth }
   headCache.set(sid, h)
   return h
 }
@@ -375,8 +383,19 @@ function fileHasUuid(file, uuid) {
   }
 }
 
-// Which live session's transcript contains this uuid? Heads first, since that is
-// free; only then scan whole files, which is why the answer gets cached.
+// Which live session's transcript contains this uuid?
+//
+// The record is OWNED by the session that wrote it and merely COPIED into every
+// fork taken afterwards, so several transcripts hold it and the oldest of them is
+// the writer — the origin being looked for. Whichever the map happened to yield
+// first used to win, and that is normally a co-fork: sibling forks of one compact
+// boundary all carry the uuid in their heads, while the parent's own copy sits deep
+// (measured: 4,736,925 bytes in, past the 4MB head cap). So the cheap head pass
+// answered with a sibling before the parent was ever read.
+//
+// Oldest-first with a head check ahead of the scan keeps the common case free and
+// bounds the cost: a full scan only happens for candidates OLDER than the answer,
+// and only once per session — forkCache holds the result for the process's life.
 function ownerOf(uuid, self, heads) {
   // A fork cannot predate its origin, so only sessions that STARTED EARLIER are
   // candidates. Without this the arrow can point either way — and did: resuming a
@@ -384,12 +403,14 @@ function ownerOf(uuid, self, heads) {
   // the head of its transcript, and its own fork holds verbatim COPIES of its
   // records, so the uuid was found there and the parent was declared a fork of its
   // child. Both directions then resolved at once, drawing a two-node cycle.
-  const older = (h) => h !== self && h.dir === self.dir && h.birth && h.birth < self.birth
-  for (const [sid, h] of heads) {
-    if (older(h) && h.uuids.has(uuid)) return sid
-  }
-  for (const [sid, h] of heads) {
-    if (older(h) && fileHasUuid(h.file, uuid)) return sid
+  const older = ([, h]) =>
+    h !== self &&
+    h.dir === self.dir &&
+    (h.birth < self.birth || (h.birth === self.birth && h.fileBirth < self.fileBirth))
+  const cands = [...heads].filter(older)
+  cands.sort((a, b) => a[1].birth - b[1].birth || a[1].fileBirth - b[1].fileBirth)
+  for (const [sid, h] of cands) {
+    if (h.uuids.has(uuid) || fileHasUuid(h.file, uuid)) return sid
   }
   return null
 }
@@ -411,16 +432,32 @@ function linkForks(nodes) {
     const h = heads.get(n.sid)
     if (!h) continue
 
+    // Signal A is verbatim-copy evidence, and a verbatim copy carries the parent's
+    // timestamps — so a real A match has an EQUAL birth, never a later one. The
+    // condition used to be `h.birth > other.birth`, which no A match can satisfy,
+    // and so signal A stopped firing at all the day birth moved from the file's
+    // birthtime to the first timestamp inside the transcript. Shared head uuids with
+    // UNEQUAL births are not copies: that is a set of co-forks whose heads are the
+    // same compact-boundary record, and answering with one of them names a sibling.
+    // Those fall through to signal B, which names the origin record outright.
+    //
+    // Among equal-birth candidates the earliest FILE is the origin — the parent's
+    // transcript exists before any fork of it does. Taking the minimum rather than
+    // the first match is what keeps a second fork off its own sibling. The one case
+    // this still calls wrong is a fork OF a fork with no compaction anywhere in the
+    // chain: every head is the same copy, so the group is ordered but the arrow
+    // inside it is a guess, and the guess made here is that they all came off the
+    // root. Rarer than two forks of one session, which is what this gets right.
     let origin = null
+    let originBirth = Infinity
     for (const [sid, other] of heads) {
       if (sid === n.sid || other.dir !== h.dir) continue
+      if (other.birth !== h.birth || other.fileBirth >= h.fileBirth) continue
       let shared = false
       for (const u of h.uuids) {
         if (other.uuids.has(u)) { shared = true; break }
       }
-      // Whichever transcript was created second is the fork. On equal birth times
-      // the direction is unknowable, so no edge — better absent than backwards.
-      if (shared && h.birth > other.birth) { origin = sid; break }
+      if (shared && other.fileBirth < originBirth) { origin = sid; originBirth = other.fileBirth }
     }
     if (!origin && h.logicalParent) origin = ownerOf(h.logicalParent, h, heads)
 
