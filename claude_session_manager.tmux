@@ -58,7 +58,30 @@ tmux bind-key "$restart_key" confirm-before \
   -p 'Restart ALL Claude sessions with --resume? (y/n)' \
   "display-popup -w 80% -h 60% -E \"'$CURRENT_DIR/scripts/restart-all.sh' --go --pause\""
 
-# Track the most recently attached Claude session for the jump-back key. Append
-# (-a) so a user's own client-attached hook is preserved.
+# Track the most recently attached Claude session for the jump-back key.
+#
+# Append (-a) so a user's own client-attached hook is preserved — but drop our
+# own previous copy first, or every config reload adds one more. tmux keeps
+# hooks in the server, so they survive until the server dies: a server up 74
+# days had accumulated 17 copies, and each client attach then forked 17 bash
+# processes making 34 tmux calls. The server is single-threaded, so a restart-all
+# across 21 sessions (357 hook runs, each fork slow under memory pressure) queued
+# behind them and every key press looked dead for a minute.
+#
+# Match on the script name, not the exact command: older copies used
+# '#{client_session}' without the q: quote and must be swept too.
+hook_survivors=()
+while IFS= read -r hook_line; do
+  hook_value="${hook_line#*] }"
+  case "$hook_value" in
+  *record-last.sh*) ;; # a copy of ours, any vintage — drop it
+  *) hook_survivors+=("$hook_value") ;;
+  esac
+done < <(tmux show-hooks -g 2>/dev/null | grep '^client-attached\[')
+
+tmux set-hook -gu client-attached
+for hook_value in "${hook_survivors[@]:-}"; do
+  [ -n "$hook_value" ] && tmux set-hook -ga client-attached "$hook_value"
+done
 tmux set-hook -ga client-attached \
   "run-shell \"$CURRENT_DIR/scripts/record-last.sh '#{q:client_session}'\""
