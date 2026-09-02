@@ -63,6 +63,7 @@ for f in "${files[@]}"; do
   [[ "$live" == *" $id "* ]] && continue   # already open in a session
   path="$(jq -r 'select(.cwd) | .cwd' "$f" 2>/dev/null | head -1)"
   [ -d "$path" ] || continue            # moved or deleted since
+  [ "$path" = "/" ] && continue         # started from root; nothing to resume into
 
   # /rename wins over the auto-generated title, same as the resume picker shows.
   # It lands in one of two places depending on when the session was renamed:
@@ -102,4 +103,7 @@ else
   echo
   echo "run this in a shell to create them:"
   echo "  $0 --go --days $days --max $max"
+  echo
+  echo "  --days N   how far back to look        (now $days)"
+  echo "  --max  N   sessions per directory      (now $max)"
 fi
