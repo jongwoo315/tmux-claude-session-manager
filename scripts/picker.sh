@@ -508,6 +508,10 @@ emit_rows() {
     T_PROMPT[${#T_PROMPT[@]}]="$prompt"
   done <<<"$TITLES"
 
+  # 한 번의 렌더에서 새로 잴 세션 수. 아래 루프는 파이프 서브셸이라 이 카운터가
+  # 밖으로 안 나가지만, 세는 단위가 렌더 하나라 그대로 맞다.
+  FILLED=0
+  GIT_FILL_MAX="$(get_tmux_option @claude_git_fill_max 3)"
   printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact bg gitcol linkcol; do
     # A user ESC-interrupt ends the turn without firing ANY hook — Claude Code has
     # no interrupt event, and Stop only fires on a normal finish — so `working`
@@ -625,33 +629,48 @@ emit_rows() {
     # 없어서, repo 안에 있어도 계속 비어 보인다. 미설정일 때만 여기서 한 번 재고
     # 옵션에 남긴다 — 세션당 1회고 그 뒤로는 위 경로로 공짜다. state.sh 가 repo
     # 아닌 곳에 "-" 를 쓰므로 「아직 안 잼」과 「repo 아님」이 구분된다.
-    if [ -z "$gitcol" ]; then
-      if gitcol=$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null); then
-        gn=$(git -C "$path" status --porcelain 2>/dev/null | grep -c '')
-        [ "$gn" -gt 0 ] && gitcol="$gitcol *$gn"
-        ga=$(git -C "$path" rev-list --count '@{u}..HEAD' 2>/dev/null)
-        [ -n "$ga" ] && [ "$ga" -gt 0 ] && gitcol="$gitcol ↑$ga"
+    # 훅이 아직 안 돈 세션은 값이 없다. 여기서 재되 렌더당 GIT_FILL_MAX 개까지만
+    # 한다.
+    #
+    # 전부 한 번에 재면 12 세션에 700ms 가 걸리고, `load` 바인딩의 reload 는 그
+    # 동안 목록을 비워 두므로 세션이 통째로 사라졌다 나타난다 (실측 콜드 700ms
+    # vs 웜 40ms). reload-sync 로 바꾸거나 sleep 을 앞에 두는 우회는 둘 다 이미
+    # 시도했다 되돌린 것이다 — 위 `load` 주석 참조. 그래서 명령을 느리게 만들지
+    # 않는 쪽으로 푼다: 몇 개씩 채우면 두어 번의 새로고침 만에 전부 차고, 한 번의
+    # 렌더가 늘어나는 폭은 40ms 남짓이다.
+    if [ -z "$gitcol" ] && [ "$FILLED" -lt "$GIT_FILL_MAX" ]; then
+      FILLED=$((FILLED + 1))
+      # status --porcelain -b 한 번으로 브랜치·ahead·더티를 다 얻는다. 예전에는
+      # rev-parse + status + rev-list 로 세 번 돌았다 (세션당 70ms -> 40ms).
+      gst=$(git -C "$path" status --porcelain -b 2>/dev/null)
+      if [ -n "$gst" ]; then
+        ghead=${gst%%$'\n'*}                       # "## feat/x...origin/feat/x [ahead 2]"
+        gbr=${ghead#\#\# }; gbr=${gbr%%...*}
+        # detached HEAD 는 "## HEAD (no branch)" 로 나온다. 예전 rev-parse
+        # --abbrev-ref 는 "HEAD" 만 줬고, 괄호까지 두면 22 폭을 다 먹는다.
+        gbr=${gbr%% *}
+        gahead=''
+        case "$ghead" in *'[ahead '*) gahead="${ghead#*\[ahead }"; gahead="${gahead%%[],]*}" ;; esac
+        gdirty=$(printf '%s\n' "$gst" | grep -vc '^##')
+        gitcol="$gbr"
+        [ "${gdirty:-0}" -gt 0 ] && gitcol="$gitcol *$gdirty"
+        [ -n "$gahead" ] && gitcol="$gitcol ↑$gahead"
+
+        # rev-parse 도 두 값을 한 번에 받는다.
+        grp=$(git -C "$path" rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null)
+        gtop=${grp%%$'\n'*}; gcmn=${grp##*$'\n'}; gmain=${gcmn%/.git}
+        if [ -n "$gtop" ] && [ "$gtop" != "$gmain" ]; then
+          linkcol=">$gmain"
+        else
+          gw=$(git -C "$path" worktree list 2>/dev/null | grep -c '')
+          if [ "${gw:-0}" -gt 1 ]; then linkcol="+$((gw - 1))wt"; else linkcol='-'; fi
+        fi
       else
-        gitcol='-'
+        gitcol='-'; linkcol='-'
       fi
       tmux set-option -t "$s" @claude_git "$gitcol" 2>/dev/null
-    fi
-    if [ -z "$linkcol" ]; then
-      gtop=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)
-      gcmn=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-      gmain="${gcmn%/.git}"
-      if [ -n "$gtop" ] && [ "$gtop" != "$gmain" ]; then
-        linkcol=">$gmain"
-      else
-        gw=$(git -C "$path" worktree list 2>/dev/null | grep -c '')
-        if [ -n "$gtop" ] && [ "${gw:-0}" -gt 1 ]; then linkcol="+$((gw - 1))wt"; else linkcol='-'; fi
-      fi
       tmux set-option -t "$s" @claude_link "$linkcol" 2>/dev/null
     fi
-    # 마커가 ASCII 인 이유: pad_display 는 표시 폭을 chars + (bytes-chars)/2 로
-    # 재고, 이는 멀티바이트 문자를 전부 2칸으로 가정한다. "—"(3바이트)와
-    # "·"(2바이트)는 실제 1칸이라 폭이 과대 계산되고, 그만큼 공백을 덜 붙여
-    # 경로 열이 행마다 1~2칸씩 어긋난다 (실측: 102 vs 104).
     [ "$gitcol" = '-' ] && gitcol='.'
     pad_display "$gitcol" 22; GITCOL="$PADDED"
     pad_display "$title" 44
