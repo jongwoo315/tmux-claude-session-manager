@@ -47,12 +47,20 @@ while IFS= read -r line; do files+=("$line"); done < <(
     | sort -rn | cut -d' ' -f2-
 )
 
+# Conversations already open in a tmux session. -mmin alone is not enough: a
+# live session that has been idle for a few minutes looks stale on disk, and
+# resuming it again puts the same conversation in two panes. Field 7 of the
+# picker's snapshot is the sessionId; re-delimit with US first, because TAB is
+# IFS whitespace and an empty field would shift the rest left.
+live=" $("$DIR/picker.sh" --list 2>/dev/null | tr '\t' '\037' \
+  | awk -F'\037' 'NF>6 && $7 != "" {print $7}' | tr '\n' ' ')"
+
 claimed=" "                             # names taken this run (dry run has no
                                         # live sessions to collide with)
 n=0
 for f in "${files[@]}"; do
-  [ "$n" -ge "$max" ] && break
   id="$(basename "$f" .jsonl)"
+  [[ "$live" == *" $id "* ]] && continue   # already open in a session
   path="$(jq -r 'select(.cwd) | .cwd' "$f" 2>/dev/null | head -1)"
   [ -d "$path" ] || continue            # moved or deleted since
 
@@ -68,6 +76,12 @@ for f in "${files[@]}"; do
   while tmux has-session -t "$session" 2>/dev/null || [[ "$claimed" == *" $session "* ]]; do
     session="${base}-${i}"; ((i++))
   done
+
+  # --max is per directory, not per run. One busy directory has far more
+  # transcripts than the rest combined (42 vs 6 here), so a single global cap is
+  # spent before any other directory is reached and those sessions never come
+  # back. i-1 is already this directory's running count — the name suffix.
+  [ $((i - 1)) -le "$max" ] || continue
   claimed+="$session "
 
   printf '%-22s %-34s %s\n' "$session" "${title:-(untitled)}" "$path"
@@ -82,5 +96,10 @@ done
 if [ "$go" -eq 1 ]; then
   echo "--- $n sessions created. prefix+u to list."
 else
-  echo "--- dry run: $n sessions would be created. re-run with --go"
+  # Spell the whole command out. This normally runs in a popup, where there is
+  # no shell to complete a path and nothing on screen to copy from.
+  echo "--- dry run: $n sessions would be created. nothing was changed."
+  echo
+  echo "run this in a shell to create them:"
+  echo "  $0 --go --days $days --max $max"
 fi
