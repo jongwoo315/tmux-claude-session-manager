@@ -471,7 +471,9 @@ function parsePicker(out) {
   for (const line of out.split('\n')) {
     if (!line) continue
     const f = line.split('\t')
-    if (f.length < 6) continue
+    // 0-based. picker --list 의 열: 0=rank 1=session 2=icon 3=age 4=title
+    // 5=git 6=path 7=sessionId 8=notice 9=notice행수.
+    if (f.length < 7) continue
     const icon = f[2].replace(ANSI, '').trim() // "● working"
     const state = (icon.split(/\s+/).pop() || '').toLowerCase()
     rows.push({
@@ -479,8 +481,9 @@ function parsePicker(out) {
       state: ['working', 'idle', 'waiting', 'bg'].includes(state) ? state : 'unknown',
       age: f[3].trim(),
       label: f[4].trim(),
-      path: f[5].trim(),
-      sid: (f[6] || '').trim(),
+      git: f[5].trim() === '—' ? '' : f[5].trim(),
+      path: f[6].trim(),
+      sid: (f[7] || '').trim(),
     })
   }
   return rows
