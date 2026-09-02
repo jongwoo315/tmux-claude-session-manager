@@ -16,6 +16,7 @@ fork_key="$(get_tmux_option @claude_fork_key 'F')"
 list_key="$(get_tmux_option @claude_list_key 'u')"
 last_key="$(get_tmux_option @claude_last_key 'b')"
 restart_key="$(get_tmux_option @claude_restart_key 'A')"
+reboot_key="$(get_tmux_option @claude_reboot_key 'B')"
 
 # Launch (or re-attach to) a Claude session for the current pane's directory.
 # #{pane_current_path} / #{window_id} are expanded by run-shell before the args
@@ -57,6 +58,14 @@ tmux bind-key "$last_key" \
 tmux bind-key "$restart_key" confirm-before \
   -p 'Restart ALL Claude sessions with --resume? (y/n)' \
   "display-popup -w 80% -h 60% -E \"'$CURRENT_DIR/scripts/restart-all.sh' --go --pause\""
+
+# Rebuild sessions from the transcripts on disk — the post-reboot counterpart to
+# restart-all.sh. A reboot kills the tmux server, so nothing is left to restart
+# and the picker is empty; this reads ~/.claude/projects instead and spawns one
+# `claude --resume <id>` session per recent conversation. Dry run first (no --go)
+# so the list is reviewed before a dozen sessions and their RAM appear.
+tmux bind-key "$reboot_key" \
+  display-popup -w 80% -h 60% -E "'$CURRENT_DIR/scripts/restore-reboot.sh' --pause"
 
 # Track the most recently attached Claude session for the jump-back key.
 #
