@@ -149,6 +149,9 @@ if br="$(git -C "$gitdir" rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
   [ -n "$a" ] && [ "$a" -gt 0 ] && br="$br ↑$a"
   tmux set-option -t "$session" @claude_git "$br"
 else
-  tmux set-option -t "$session" @claude_git ""
+  # 빈 문자열이 아니라 "-" 다. show-options 는 미설정과 빈 값을 똑같이 ""로 주므로,
+  # 빈 값을 쓰면 picker 가 「아직 안 잰 세션」과 「repo 아닌 세션」을 구분하지 못해
+  # 매번 다시 잰다.
+  tmux set-option -t "$session" @claude_git "-"
 fi
 exit 0

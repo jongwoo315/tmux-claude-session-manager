@@ -620,7 +620,24 @@ emit_rows() {
     pad_display "$title" 44
     # git 열은 state.sh 가 훅에서 채운 @claude_git 을 그대로 쓴다 — picker 안에서
     # git 을 돌리면 세션 19개에 200ms 라 ctrl-x reload 마다 눈에 띈다.
-    pad_display "${gitcol:-—}" 22; GITCOL="$PADDED"
+    #
+    # 다만 훅은 턴 경계에서만 돈다. 되살렸지만 아직 한 마디도 안 한 세션은 값이
+    # 없어서, repo 안에 있어도 계속 비어 보인다. 미설정일 때만 여기서 한 번 재고
+    # 옵션에 남긴다 — 세션당 1회고 그 뒤로는 위 경로로 공짜다. state.sh 가 repo
+    # 아닌 곳에 "-" 를 쓰므로 「아직 안 잼」과 「repo 아님」이 구분된다.
+    if [ -z "$gitcol" ]; then
+      if gitcol=$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null); then
+        gn=$(git -C "$path" status --porcelain 2>/dev/null | grep -c '')
+        [ "$gn" -gt 0 ] && gitcol="$gitcol *$gn"
+        ga=$(git -C "$path" rev-list --count '@{u}..HEAD' 2>/dev/null)
+        [ -n "$ga" ] && [ "$ga" -gt 0 ] && gitcol="$gitcol ↑$ga"
+      else
+        gitcol='-'
+      fi
+      tmux set-option -t "$s" @claude_git "$gitcol" 2>/dev/null
+    fi
+    [ "$gitcol" = '-' ] && gitcol='—'
+    pad_display "$gitcol" 22; GITCOL="$PADDED"
     pad_display "$title" 44
     printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "$GITCOL" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
   done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n
