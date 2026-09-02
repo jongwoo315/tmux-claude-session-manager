@@ -722,6 +722,20 @@ resolve_links() {
 }
 
 [ "${1:-}" = '--list' ] && {
+  # `touch ~/.claude/picker-debug` 로 켜는 계측. reload 는 목록을 비우고 명령을
+  # 기다리므로, 행이 사라져 보인다는 신고가 오면 알아야 할 것은 두 가지뿐이다 —
+  # 이 호출이 얼마나 걸렸나, 그리고 몇 행을 냈나. state.sh 의 state-debug 와 같은
+  # 방식이라 평소에는 stat 한 번 값만 든다.
+  # 소요 시간은 안 적는다. bash 3.2 에는 EPOCHREALTIME 이 없어서 밀리초를 재려면
+  # 포크가 하나 더 드는데, 재려는 대상이 50ms 짜리라 계측이 대상을 밀어낸다.
+  # 여기서 필요한 것은 「이 호출이 몇 행을 냈나」 하나다.
+  if [ -e "$HOME/.claude/picker-debug" ]; then
+    __out=$(emit_rows)
+    printf '%s  rows=%s\n' "$(date '+%H:%M:%S')" "$(printf '%s' "$__out" | grep -c '')" \
+      >> "$HOME/.claude/picker-debug.log"
+    printf '%s\n' "$__out"
+    exit 0
+  fi
   emit_rows
   exit 0
 }
