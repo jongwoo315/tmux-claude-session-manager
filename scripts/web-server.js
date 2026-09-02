@@ -481,8 +481,8 @@ function parsePicker(out) {
       state: ['working', 'idle', 'waiting', 'bg'].includes(state) ? state : 'unknown',
       age: f[3].trim(),
       label: f[4].trim(),
-      git: f[5].trim() === '—' ? '' : f[5].trim(),
-      link: f[6].trim() === '—' ? '' : f[6].trim(),
+      git: f[5].trim() === '.' ? '' : f[5].trim(),
+      link: f[6].trim() === '.' ? '' : f[6].trim(),
       path: f[7].trim(),
       sid: (f[8] || '').trim(),
     })

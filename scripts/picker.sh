@@ -644,11 +644,15 @@ emit_rows() {
         linkcol=">$gmain"
       else
         gw=$(git -C "$path" worktree list 2>/dev/null | grep -c '')
-        if [ -n "$gtop" ] && [ "${gw:-0}" -gt 1 ]; then linkcol="·$((gw - 1))wt"; else linkcol='-'; fi
+        if [ -n "$gtop" ] && [ "${gw:-0}" -gt 1 ]; then linkcol="+$((gw - 1))wt"; else linkcol='-'; fi
       fi
       tmux set-option -t "$s" @claude_link "$linkcol" 2>/dev/null
     fi
-    [ "$gitcol" = '-' ] && gitcol='—'
+    # 마커가 ASCII 인 이유: pad_display 는 표시 폭을 chars + (bytes-chars)/2 로
+    # 재고, 이는 멀티바이트 문자를 전부 2칸으로 가정한다. "—"(3바이트)와
+    # "·"(2바이트)는 실제 1칸이라 폭이 과대 계산되고, 그만큼 공백을 덜 붙여
+    # 경로 열이 행마다 1~2칸씩 어긋난다 (실측: 102 vs 104).
+    [ "$gitcol" = '-' ] && gitcol='.'
     pad_display "$gitcol" 22; GITCOL="$PADDED"
     pad_display "$title" 44
     printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "$GITCOL" "$linkcol" "$path" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
@@ -660,29 +664,42 @@ emit_rows() {
 # 2차 통과인 이유: 메인 repo 를 쥔 세션이 목록 어디에 있는지는 전 행을 다 읽어야
 # 안다. 훅에서는 아예 불가능하다 — 훅은 자기 세션만 본다.
 #
+# awk 가 아니라 bash 인 이유는 폭이다. 링크 값은 세션 제목이라 한글이 섞이고,
+# awk 는 문자 수만 세서 한글 한 자를 1칸으로 잡는다 — 제목이 한글이면 링크 열이
+# 오른쪽으로 밀려 경로 열이 행마다 다른 자리에서 시작한다. pad_display 가 바이트
+# 차이로 표시 폭을 재는 그 함수다.
+#
 # 필드: 1=rank 2=session 3=icon 4=age 5=title 6=git 7=link 8=abs경로 9=표시경로
 #       10=sid 11=notice 12=notice행수. 8번(절대경로)은 여기서만 쓰고 지운다.
 resolve_links() {
-  awk -F'\t' -v OFS='\t' '
-    { rows[NR] = $0; if ($8 != "") owner[$8] = $5 }        # 절대경로 -> 제목
-    END {
-      for (i = 1; i <= NR; i++) {
-        n = split(rows[i], f, "\t")
-        if (substr(f[7], 1, 1) == ">") {
-          m = substr(f[7], 2)
-          t = (m in owner) ? owner[m] : "메인 세션 없음"
-          sub(/ +$/, "", t)
-          f[7] = t
-        } else if (f[7] == "-" || f[7] == "") {
-          f[7] = "—"
-        }
-        # 폭 22 로 자른다. pad_display 와 달리 여기는 awk 라 CJK 폭을 못 세는데,
-        # 링크 값은 세션 제목이고 제목은 이미 5번 열에서 폭이 맞춰져 나온다.
-        out = f[1]
-        for (j = 2; j <= n; j++) if (j != 8) out = out OFS f[j]
-        print out
-      }
-    }'
+  local all row f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12
+  all="$(cat)"
+
+  # 경로 -> 제목. 제목은 5번 열이라 이미 44 폭으로 패딩돼 있어 꼬리 공백을 뗀다.
+  local owners='' t
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
+    [ -n "$f8" ] || continue
+    t="${f5%"${f5##*[![:space:]]}"}"
+    owners="$owners$f8"$'\037'"$t"$'\n'
+  done <<<"$all"
+
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
+    case "$f7" in
+      '>'*)
+        local m="${f7#>}" hit=''
+        while IFS=$'\037' read -r op ot; do
+          [ "$op" = "$m" ] && { hit="$ot"; break; }
+        done <<<"$owners"
+        # 세션이 없으면 repo 이름으로 떨어뜨린다. "메인 세션 없음" 은 자리만
+        # 차지하고 어느 repo 인지 못 알려준다 — 이름이면 최소한 그건 답한다.
+        f7="${hit:-${m##*/}}"
+        ;;
+      ''|'-') f7='.' ;;
+    esac
+    pad_display "$f7" 20
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$f1" "$f2" "$f3" "$f4" "$f5" "$f6" "$PADDED" "$f9" "$f10" "$f11" "$f12"
+  done <<<"$all"
 }
 
 [ "${1:-}" = '--list' ] && {

@@ -163,7 +163,7 @@ if br="$(git -C "$gitdir" rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
   else
     w="$(git -C "$gitdir" worktree list 2>/dev/null | grep -c '')"
     if [ "${w:-0}" -gt 1 ]; then
-      tmux set-option -t "$session" @claude_link "·$((w - 1))wt"
+      tmux set-option -t "$session" @claude_link "+$((w - 1))wt"
     else
       tmux set-option -t "$session" @claude_link "-"
     fi
