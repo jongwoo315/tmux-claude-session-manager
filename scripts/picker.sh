@@ -60,16 +60,16 @@ NOTICE_W=72
 # The decision is made in --list, not here, because --list already reads
 # #{window_activity} and knows `now`. Doing it in the preview would cost a second
 # tmux round trip, which is the thing being removed.
-# {8} is NOT wrapped in quotes here: fzf substitutes placeholders already shell
-# quoted, so "{8}" on an empty field yields a literal '' — two apostrophes, which
+# {9} is NOT wrapped in quotes here: fzf substitutes placeholders already shell
+# quoted, so "{9}" on an empty field yields a literal '' — two apostrophes, which
 # test -n reads as non-empty and every row printed them instead of a preview.
 #
-# The notice is centred in the window. {9} is its row count and NOTICE_W its fixed
+# The notice is centred in the window. {10} is its row count and NOTICE_W its fixed
 # column width, both settled in --list, so the offsets are two subtractions and no
 # measuring. Everything here is a shell builtin — adding an awk just to lay out a
 # handful of lines would put a third of the saved time back.
 #
-# {9} is assigned to _n before any arithmetic touches it. fzf runs this with
+# {10} is assigned to _n before any arithmetic touches it. fzf runs this with
 # $SHELL, which is zsh on this machine, and fzf substitutes placeholders shell
 # quoted — zsh rejects the quoted operand in $(( x - '18' )) outright, so the
 # whole preview came back as a math error.
@@ -78,7 +78,7 @@ NOTICE_W=72
 # fzf parses a bind action up to its matching paren and a literal newline inside
 # it silently swallows the whole binding, so the readable indented form could not
 # be reused for the ctrl-o restore below.
-PREVIEW_CMD='[ -n {8} ] && { _t={8}; _n={9}; _pad=""; _i=0; _down=$(( ( ${FZF_PREVIEW_LINES:-40} - _n ) / 2 )); _in=$(( ( ${FZF_PREVIEW_COLUMNS:-80} - '"$NOTICE_W"' ) / 2 )); while [ $_i -lt $_down ]; do printf "\n"; _i=$(( _i + 1 )); done; _i=0; while [ $_i -lt $_in ]; do _pad="$_pad "; _i=$(( _i + 1 )); done; printf "%b\n" "$_pad${_t//\\n/\\n$_pad}"; exit 0; }; tmux capture-pane -ept {2} -S -80 2>/dev/null | awk -v want=$(( ${FZF_PREVIEW_LINES:-60} + 2 )) "$CLAUDE_PREVIEW_AWK"'
+PREVIEW_CMD='[ -n {9} ] && { _t={9}; _n={10}; _pad=""; _i=0; _down=$(( ( ${FZF_PREVIEW_LINES:-40} - _n ) / 2 )); _in=$(( ( ${FZF_PREVIEW_COLUMNS:-80} - '"$NOTICE_W"' ) / 2 )); while [ $_i -lt $_down ]; do printf "\n"; _i=$(( _i + 1 )); done; _i=0; while [ $_i -lt $_in ]; do _pad="$_pad "; _i=$(( _i + 1 )); done; printf "%b\n" "$_pad${_t//\\n/\\n$_pad}"; exit 0; }; tmux capture-pane -ept {2} -S -80 2>/dev/null | awk -v want=$(( ${FZF_PREVIEW_LINES:-60} + 2 )) "$CLAUDE_PREVIEW_AWK"'
 
 # ctrl-g swaps the preview over to the live pane; ctrl-o swaps back.
 #
@@ -474,7 +474,7 @@ emit_rows() {
   # (unit separator), NOT tab: tab is a whitespace IFS char, so an empty middle
   # field (e.g. orch sessions have no @claude_title) would collapse and shift the
   # remaining columns. \037 never appears in a name or path.
-  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}\037#{@claude_bg}')
+  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}\037#{@claude_bg}\037#{@claude_git}')
   # Filtered by tmux, not by a piped grep: -f evaluates the same prefix test
   # server-side and saves a fork per refresh (verified to select the identical 17
   # sessions). #{m:...} is a glob match, so the prefix needs a trailing *.
@@ -508,7 +508,7 @@ emit_rows() {
     T_PROMPT[${#T_PROMPT[@]}]="$prompt"
   done <<<"$TITLES"
 
-  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact bg; do
+  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact bg gitcol; do
     # A user ESC-interrupt ends the turn without firing ANY hook — Claude Code has
     # no interrupt event, and Stop only fires on a normal finish — so `working`
     # sticks (red) until the next prompt. Cross-check it against tmux's own
@@ -618,7 +618,11 @@ emit_rows() {
       frozen_rows=$((frozen_rows + 2))
     fi
     pad_display "$title" 44
-    printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
+    # git 열은 state.sh 가 훅에서 채운 @claude_git 을 그대로 쓴다 — picker 안에서
+    # git 을 돌리면 세션 19개에 200ms 라 ctrl-x reload 마다 눈에 띈다.
+    pad_display "${gitcol:-—}" 22; GITCOL="$PADDED"
+    pad_display "$title" 44
+    printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "$GITCOL" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
   done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n
 }
 
@@ -689,7 +693,7 @@ fi
 pos_opt=()
 [ "$start_pos" -gt 0 ] && pos_opt=(--sync --bind="start:pos($start_pos)")
 
-sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6 \
+sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6,7 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
   --preview="$PREVIEW_CMD" --preview-window='up,70%,follow' \
 	--bind="load:reload($self --list; sleep 2)" \

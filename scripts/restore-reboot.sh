@@ -49,11 +49,11 @@ while IFS= read -r line; do files+=("$line"); done < <(
 
 # Conversations already open in a tmux session. -mmin alone is not enough: a
 # live session that has been idle for a few minutes looks stale on disk, and
-# resuming it again puts the same conversation in two panes. Field 7 of the
+# resuming it again puts the same conversation in two panes. Field 8 of the
 # picker's snapshot is the sessionId; re-delimit with US first, because TAB is
 # IFS whitespace and an empty field would shift the rest left.
 live=" $("$DIR/picker.sh" --list 2>/dev/null | tr '\t' '\037' \
-  | awk -F'\037' 'NF>6 && $7 != "" {print $7}' | tr '\n' ' ')"
+  | awk -F'\037' 'NF>7 && $8 != "" {print $8}' | tr '\n' ' ')"
 
 claimed=" "                             # names taken this run (dry run has no
                                         # live sessions to collide with)
