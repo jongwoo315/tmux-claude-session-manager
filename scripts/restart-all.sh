@@ -138,13 +138,19 @@ if [ -n "$attached" ]; then
 fi
 
 # --list is the picker's own snapshot: 2=session 3=state 5=title 6=cwd 7=sessionId.
-rows="$("$DIR/picker.sh" --list 2>/dev/null)"
+# Re-delimit with US (0x1f) before parsing. TAB is an IFS *whitespace* character,
+# so `IFS=$'\t' read` collapses runs of tabs: a session with no transcript has an
+# empty sessionId, the empty field disappears, and every later field shifts one
+# slot left — sid then holds the pane-preview text. That fed `claude --resume
+# '⏸ pane preview off …'`, which dies on start, and the recreate abort took the
+# session with it. US is not IFS whitespace, so empty fields are preserved.
+rows="$("$DIR/picker.sh" --list 2>/dev/null | tr '\t' '\037')"
 [ -n "$rows" ] || { printf 'No Claude sessions found.\n'; exit 0; }
 
 plan=''    # session \t cwd \t sid \t title \t origin
 busy=''
 total=0
-while IFS=$'\t' read -r _rank session state _age title cwd sid _prompt _n; do
+while IFS=$'\037' read -r _rank session state _age title cwd sid _prompt _n; do
   [ -n "$session" ] || continue
   total=$((total + 1))
   # state carries ANSI colour and a status glyph; keep the word only.
@@ -156,7 +162,7 @@ while IFS=$'\t' read -r _rank session state _age title cwd sid _prompt _n; do
   real="$(tmux display-message -pt "$session" '#{pane_current_path}' 2>/dev/null)"
   [ -n "$real" ] || real="${cwd/#\~/$HOME}"
   origin="$(tmux show-options -qv -t "$session" @claude_origin 2>/dev/null)"
-  plan+="$session"$'\t'"$real"$'\t'"$sid"$'\t'"$(printf '%s' "$title" | sed 's/ *$//')"$'\t'"$origin"$'\n'
+  plan+="$session"$'\037'"$real"$'\037'"$sid"$'\037'"$(printf '%s' "$title" | sed 's/ *$//')"$'\037'"$origin"$'\n'
 done <<< "$rows"
 
 # Hard gate. Nothing is killed unless every session is settled.
@@ -170,7 +176,7 @@ if [ -n "$busy" ]; then
 fi
 
 printf '=== %s session(s) — all settled ===\n' "$total"
-while IFS=$'\t' read -r s p sid t _o; do
+while IFS=$'\037' read -r s p sid t _o; do
   [ -n "$s" ] || continue
   printf '  %-38s %-26s %s\n' "$s" "${t:-—}" "${sid:-<no transcript — fresh start>}"
 done <<< "$plan"
@@ -188,7 +194,7 @@ fi
 # these rows carry directory paths and session labels.
 mkdir -p "$cache_dir" 2>/dev/null
 snap="$cache_dir/restart-plan.tsv"
-if printf '%s' "$plan" > "$snap.tmp" 2>/dev/null && mv "$snap.tmp" "$snap" 2>/dev/null; then
+if printf '%s' "$plan" | tr '\037' '\t' > "$snap.tmp" 2>/dev/null && mv "$snap.tmp" "$snap" 2>/dev/null; then
   chmod 600 "$snap" 2>/dev/null
   printf '\nPlan saved to %s\n' "$snap"
 else
@@ -202,7 +208,7 @@ fi
 printf '\n'
 fail=0
 aborted=''
-while IFS=$'\t' read -r session path sid title origin; do
+while IFS=$'\037' read -r session path sid title origin; do
   [ -n "$session" ] || continue
   # Stop killing the moment a recreate fails. The old behaviour carried on
   # down the list, so one broken recreate cost every remaining session too.
@@ -213,6 +219,13 @@ while IFS=$'\t' read -r session path sid title origin; do
   # Reuse the user's configured command verbatim so wrappers survive (their
   # resume command is `printf '\033[5 q'; exec claude --resume …`, so the binary
   # is NOT the first word — splitting on whitespace would break it).
+  # Only a real UUID may reach --resume. Anything else means the row was
+  # mis-parsed; a fresh start loses history but keeps the session alive, which
+  # beats killing it and failing to bring it back.
+  case "$sid" in
+    ????????-????-????-????-????????????) : ;;
+    ?*) printf '  ! %s — ignoring malformed session id, starting fresh\n' "$session" >&2; sid='' ;;
+  esac
   if [ -n "$sid" ]; then
     if [[ "$resume_cmd" == *" --resume"* ]]; then
       cmd="${resume_cmd/ --resume/ --resume $sid}"
@@ -270,7 +283,7 @@ fi
 wait_secs="$(get_tmux_option @claude_restart_wait 60)"
 printf '\nWaiting for panes to render (up to %ss)…\n' "$wait_secs"
 pending=''
-while IFS=$'\t' read -r s _p _sid _t _o; do
+while IFS=$'\037' read -r s _p _sid _t _o; do
   [ -n "$s" ] && pending+="$s"$'\n'
 done <<< "$plan"
 
