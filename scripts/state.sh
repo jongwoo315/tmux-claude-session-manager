@@ -60,7 +60,32 @@ if [ ! -t 0 ]; then
   # signal; let it through (as `working`) despite its agent_id.
   case "$raw" in *'"hook_event_name":"SubagentStop"'*) subagent_stop=true ;; esac
   if [ "$subagent_stop" = false ]; then
-    case "$raw" in *'"agent_id":"'*) exit 0 ;; esac
+    case "$raw" in *'"agent_id":"'*)
+      # 서브에이전트 이벤트는 부모 상태를 건드리지 않는다 — 단 하나 예외가 있다.
+      #
+      # 권한 프롬프트(Notification)로 걸린 waiting 은 사람이 답하면 사라지는데,
+      # 그 답을 알려주는 이벤트가 따로 없다. 승인 뒤 이어지는 도구 호출이 그
+      # 서브에이전트 것이면 여기서 전부 버려지고, 마지막 SubagentStop 마저 아래
+      # 112번 가드가 막아서 세션이 waiting 에 갇힌다. 무인 orch 세션은 사용자
+      # 프롬프트가 안 오므로 영영 안 풀린다 (실측 2026-09-03 claude-orch-95-search:
+      # 00:39:44 Notification -> waiting, 00:40:13·00:41:00 PostToolUse 가 로그에만
+      # 찍히고 상태는 그대로).
+      #
+      # 서브에이전트가 다시 도구를 쓴다는 것이 곧 프롬프트가 사라졌다는 증거다.
+      # AskUserQuestion/ExitPlanMode 로 걸린 waiting 은 상자가 그대로 떠 있으므로
+      # 여기서 풀면 안 된다 — 그래서 @claude_wait_src 로 출처를 갈라 둔다.
+      #
+      # tmux 호출이 하나 붙지만 서브에이전트 이벤트에만 든다. wait_src 는 waiting 을
+      # 벗어날 때 지워지므로, 값이 비어 있지 않다는 것만으로 「지금 권한 대기 중」이
+      # 판정돼 상태를 따로 읽지 않아도 된다.
+      if [ -n "$(tmux display-message -p -t "$session" '#{@claude_wait_src}' 2>/dev/null)" ]; then
+        tmux set-option -t "$session" @claude_state working
+        tmux set-option -t "$session" @claude_bg 0
+        tmux set-option -t "$session" @claude_state_at "$(date +%s)"
+        tmux set-option -qu -t "$session" @claude_wait_src
+      fi
+      exit 0 ;;
+    esac
   fi
   # A session with live agents BOUNCES idle<->working every agent-notification
   # cycle (Stop -> idle, SubagentStop -> working). Each bounce is a transition, so
@@ -104,12 +129,19 @@ if [ ! -t 0 ]; then
   case "$new:$raw" in idle:*'"status":"running"'*) new=working; skip_stamp=true; bg=1 ;; esac
 fi
 
-cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
+# 한 번의 display-message 로 둘을 같이 읽는다 — show-options 두 번이면 포크가 둘이다.
+IFS=' ' read -r cur wait_src <<EOF
+$(tmux display-message -p -t "$session" '#{@claude_state} #{@claude_wait_src}' 2>/dev/null)
+EOF
 
 # SubagentStop must not clobber waiting: if the parent is blocked on
 # AskUserQuestion/permission, an agent finishing doesn't unblock it — the box is
 # still up. (UserPromptSubmit/PostToolUse working legitimately clear waiting.)
-[ "$subagent_stop" = true ] && [ "$cur" = "waiting" ] && exit 0
+# 권한 프롬프트로 걸린 waiting 은 예외다 — 위 agent_id 게이트와 같은 이유로,
+# 에이전트가 끝났다는 것은 승인이 났다는 뜻이다. AskUserQuestion 쪽은 그대로 막는다.
+if [ "$subagent_stop" = true ] && [ "$cur" = "waiting" ]; then
+  [ -z "$wait_src" ] && exit 0
+fi
 
 # Don't let a Stop-fired idle clobber waiting. AskUserQuestion/ExitPlanMode set
 # waiting via PreToolUse; a session blocked on user input is NOT idle. Only the
@@ -123,6 +155,17 @@ cur=$(tmux show-options -qv -t "$session" @claude_state 2>/dev/null)
 # same state), so the picker age never counts up. Same-state re-assert keeps the
 # original timestamp → age reflects time since the state actually began.
 tmux set-option -t "$session" @claude_state "$new"
+# waiting 의 출처. Notification 은 권한 프롬프트라 답하면 사라지고, PreToolUse
+# (AskUserQuestion/ExitPlanMode)는 상자가 떠 있어 사용자 입력이 있어야 풀린다.
+# 위 두 자리가 이 값으로 갈린다.
+if [ "$new" = "waiting" ]; then
+  case "$raw" in
+    *'"hook_event_name":"Notification"'*) tmux set-option -t "$session" @claude_wait_src notification ;;
+    *) tmux set-option -qu -t "$session" @claude_wait_src ;;
+  esac
+else
+  tmux set-option -qu -t "$session" @claude_wait_src
+fi
 # Written on every path that gets here, so it clears itself: the next foreground
 # event (PostToolUse/UserPromptSubmit = working) or a real idle resets it to 0.
 # The early exits above leave it alone, which is right — they change no state,
