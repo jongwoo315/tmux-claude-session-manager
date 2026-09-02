@@ -137,7 +137,7 @@ if [ -n "$attached" ]; then
   exit 1
 fi
 
-# --list is the picker's own snapshot: 2=session 3=state 5=title 6=git 7=cwd 8=sessionId.
+# --list is the picker's own snapshot: 2=session 3=state 5=title 6=git 7=link 8=cwd 9=sessionId.
 # Re-delimit with US (0x1f) before parsing. TAB is an IFS *whitespace* character,
 # so `IFS=$'\t' read` collapses runs of tabs: a session with no transcript has an
 # empty sessionId, the empty field disappears, and every later field shifts one
@@ -150,7 +150,7 @@ rows="$("$DIR/picker.sh" --list 2>/dev/null | tr '\t' '\037')"
 plan=''    # session \t cwd \t sid \t title \t origin
 busy=''
 total=0
-while IFS=$'\037' read -r _rank session state _age title _git cwd sid _prompt _n; do
+while IFS=$'\037' read -r _rank session state _age title _git _link cwd sid _prompt _n; do
   [ -n "$session" ] || continue
   total=$((total + 1))
   # state carries ANSI colour and a status glyph; keep the word only.

@@ -60,16 +60,16 @@ NOTICE_W=72
 # The decision is made in --list, not here, because --list already reads
 # #{window_activity} and knows `now`. Doing it in the preview would cost a second
 # tmux round trip, which is the thing being removed.
-# {9} is NOT wrapped in quotes here: fzf substitutes placeholders already shell
-# quoted, so "{9}" on an empty field yields a literal '' — two apostrophes, which
+# {10} is NOT wrapped in quotes here: fzf substitutes placeholders already shell
+# quoted, so "{10}" on an empty field yields a literal '' — two apostrophes, which
 # test -n reads as non-empty and every row printed them instead of a preview.
 #
-# The notice is centred in the window. {10} is its row count and NOTICE_W its fixed
+# The notice is centred in the window. {11} is its row count and NOTICE_W its fixed
 # column width, both settled in --list, so the offsets are two subtractions and no
 # measuring. Everything here is a shell builtin — adding an awk just to lay out a
 # handful of lines would put a third of the saved time back.
 #
-# {10} is assigned to _n before any arithmetic touches it. fzf runs this with
+# {11} is assigned to _n before any arithmetic touches it. fzf runs this with
 # $SHELL, which is zsh on this machine, and fzf substitutes placeholders shell
 # quoted — zsh rejects the quoted operand in $(( x - '18' )) outright, so the
 # whole preview came back as a math error.
@@ -78,7 +78,7 @@ NOTICE_W=72
 # fzf parses a bind action up to its matching paren and a literal newline inside
 # it silently swallows the whole binding, so the readable indented form could not
 # be reused for the ctrl-o restore below.
-PREVIEW_CMD='[ -n {9} ] && { _t={9}; _n={10}; _pad=""; _i=0; _down=$(( ( ${FZF_PREVIEW_LINES:-40} - _n ) / 2 )); _in=$(( ( ${FZF_PREVIEW_COLUMNS:-80} - '"$NOTICE_W"' ) / 2 )); while [ $_i -lt $_down ]; do printf "\n"; _i=$(( _i + 1 )); done; _i=0; while [ $_i -lt $_in ]; do _pad="$_pad "; _i=$(( _i + 1 )); done; printf "%b\n" "$_pad${_t//\\n/\\n$_pad}"; exit 0; }; tmux capture-pane -ept {2} -S -80 2>/dev/null | awk -v want=$(( ${FZF_PREVIEW_LINES:-60} + 2 )) "$CLAUDE_PREVIEW_AWK"'
+PREVIEW_CMD='[ -n {10} ] && { _t={10}; _n={11}; _pad=""; _i=0; _down=$(( ( ${FZF_PREVIEW_LINES:-40} - _n ) / 2 )); _in=$(( ( ${FZF_PREVIEW_COLUMNS:-80} - '"$NOTICE_W"' ) / 2 )); while [ $_i -lt $_down ]; do printf "\n"; _i=$(( _i + 1 )); done; _i=0; while [ $_i -lt $_in ]; do _pad="$_pad "; _i=$(( _i + 1 )); done; printf "%b\n" "$_pad${_t//\\n/\\n$_pad}"; exit 0; }; tmux capture-pane -ept {2} -S -80 2>/dev/null | awk -v want=$(( ${FZF_PREVIEW_LINES:-60} + 2 )) "$CLAUDE_PREVIEW_AWK"'
 
 # ctrl-g swaps the preview over to the live pane; ctrl-o swaps back.
 #
@@ -474,7 +474,7 @@ emit_rows() {
   # (unit separator), NOT tab: tab is a whitespace IFS char, so an empty middle
   # field (e.g. orch sessions have no @claude_title) would collapse and shift the
   # remaining columns. \037 never appears in a name or path.
-  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}\037#{@claude_bg}\037#{@claude_git}')
+  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}\037#{@claude_bg}\037#{@claude_git}\037#{@claude_link}')
   # Filtered by tmux, not by a piped grep: -f evaluates the same prefix test
   # server-side and saves a fork per refresh (verified to select the identical 17
   # sessions). #{m:...} is a glob match, so the prefix needs a trailing *.
@@ -508,7 +508,7 @@ emit_rows() {
     T_PROMPT[${#T_PROMPT[@]}]="$prompt"
   done <<<"$TITLES"
 
-  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact bg gitcol; do
+  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact bg gitcol linkcol; do
     # A user ESC-interrupt ends the turn without firing ANY hook — Claude Code has
     # no interrupt event, and Stop only fires on a normal finish — so `working`
     # sticks (red) until the next prompt. Cross-check it against tmux's own
@@ -569,7 +569,7 @@ emit_rows() {
     # the longest name. Padded by pad_display, NOT printf's %-44s — that pads by
     # bytes and misaligns any CJK title. rank asc, then age asc (just-finished
     # floats to group top).
-    # Field 7 (sessionId) is for web-server.js to locate the transcript; fzf renders
+    # Field 9 (sessionId) is for web-server.js to locate the transcript; fzf renders
     # only fields 3..6, so it never shows up in the picker itself.
     #
     # Field 8 is the preview notice, empty for a live pane. Built here rather than
@@ -636,11 +636,53 @@ emit_rows() {
       fi
       tmux set-option -t "$s" @claude_git "$gitcol" 2>/dev/null
     fi
+    if [ -z "$linkcol" ]; then
+      gtop=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)
+      gcmn=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+      gmain="${gcmn%/.git}"
+      if [ -n "$gtop" ] && [ "$gtop" != "$gmain" ]; then
+        linkcol=">$gmain"
+      else
+        gw=$(git -C "$path" worktree list 2>/dev/null | grep -c '')
+        if [ -n "$gtop" ] && [ "${gw:-0}" -gt 1 ]; then linkcol="·$((gw - 1))wt"; else linkcol='-'; fi
+      fi
+      tmux set-option -t "$s" @claude_link "$linkcol" 2>/dev/null
+    fi
     [ "$gitcol" = '-' ] && gitcol='—'
     pad_display "$gitcol" 22; GITCOL="$PADDED"
     pad_display "$title" 44
-    printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "$GITCOL" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
-  done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n
+    printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "$GITCOL" "$linkcol" "$path" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
+  done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n | resolve_links
+}
+
+# 링크 열의 ">/abs/path" 를 그 경로를 쥔 세션의 제목으로 바꾼다.
+#
+# 2차 통과인 이유: 메인 repo 를 쥔 세션이 목록 어디에 있는지는 전 행을 다 읽어야
+# 안다. 훅에서는 아예 불가능하다 — 훅은 자기 세션만 본다.
+#
+# 필드: 1=rank 2=session 3=icon 4=age 5=title 6=git 7=link 8=abs경로 9=표시경로
+#       10=sid 11=notice 12=notice행수. 8번(절대경로)은 여기서만 쓰고 지운다.
+resolve_links() {
+  awk -F'\t' -v OFS='\t' '
+    { rows[NR] = $0; if ($8 != "") owner[$8] = $5 }        # 절대경로 -> 제목
+    END {
+      for (i = 1; i <= NR; i++) {
+        n = split(rows[i], f, "\t")
+        if (substr(f[7], 1, 1) == ">") {
+          m = substr(f[7], 2)
+          t = (m in owner) ? owner[m] : "메인 세션 없음"
+          sub(/ +$/, "", t)
+          f[7] = t
+        } else if (f[7] == "-" || f[7] == "") {
+          f[7] = "—"
+        }
+        # 폭 22 로 자른다. pad_display 와 달리 여기는 awk 라 CJK 폭을 못 세는데,
+        # 링크 값은 세션 제목이고 제목은 이미 5번 열에서 폭이 맞춰져 나온다.
+        out = f[1]
+        for (j = 2; j <= n; j++) if (j != 8) out = out OFS f[j]
+        print out
+      }
+    }'
 }
 
 [ "${1:-}" = '--list' ] && {
@@ -710,7 +752,7 @@ fi
 pos_opt=()
 [ "$start_pos" -gt 0 ] && pos_opt=(--sync --bind="start:pos($start_pos)")
 
-sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6,7 \
+sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6,7,8 \
   --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
   --preview="$PREVIEW_CMD" --preview-window='up,70%,follow' \
 	--bind="load:reload($self --list; sleep 2)" \

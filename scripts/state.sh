@@ -148,7 +148,28 @@ if br="$(git -C "$gitdir" rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
   a="$(git -C "$gitdir" rev-list --count '@{u}..HEAD' 2>/dev/null)"
   [ -n "$a" ] && [ "$a" -gt 0 ] && br="$br ↑$a"
   tmux set-option -t "$session" @claude_git "$br"
+
+  # @claude_link — 워크트리면 메인 repo의 절대 경로, 메인이면 딸린 워크트리 수.
+  # picker 가 경로를 그 repo 를 쥔 세션의 제목으로 바꿔 그린다. 세션 제목은 다른
+  # 세션의 것이라 훅에서 못 만든다 — 훅은 자기 세션만 안다.
+  #
+  # --path-format=absolute 가 필요하다. 메인 워크트리 안에서 --git-common-dir 은
+  # 상대 경로 ".git" 을 돌려주므로, 그대로 비교하면 메인이 워크트리로 오판된다.
+  top="$(git -C "$gitdir" rev-parse --show-toplevel 2>/dev/null)"
+  cmn="$(git -C "$gitdir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  mainroot="${cmn%/.git}"
+  if [ -n "$top" ] && [ "$top" != "$mainroot" ]; then
+    tmux set-option -t "$session" @claude_link ">$mainroot"
+  else
+    w="$(git -C "$gitdir" worktree list 2>/dev/null | grep -c '')"
+    if [ "${w:-0}" -gt 1 ]; then
+      tmux set-option -t "$session" @claude_link "·$((w - 1))wt"
+    else
+      tmux set-option -t "$session" @claude_link "-"
+    fi
+  fi
 else
+  tmux set-option -t "$session" @claude_link "-"
   # 빈 문자열이 아니라 "-" 다. show-options 는 미설정과 빈 값을 똑같이 ""로 주므로,
   # 빈 값을 쓰면 picker 가 「아직 안 잰 세션」과 「repo 아닌 세션」을 구분하지 못해
   # 매번 다시 잰다.
