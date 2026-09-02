@@ -61,6 +61,14 @@ n=0
 for f in "${files[@]}"; do
   id="$(basename "$f" .jsonl)"
   [[ "$live" == *" $id "* ]] && continue   # already open in a session
+
+  # `claude -p` writes a transcript exactly like an interactive session does, so
+  # every cron run in ~/prv/jobs looked like a session worth reviving. entrypoint
+  # separates them: cli is a person, sdk-cli is headless (scheduled jobs,
+  # subagents). Over 60 days that is 70 headless against 57 real. Matching on
+  # path instead would miss the headless runs that land in ordinary project
+  # directories. grep -m1 stops at the first hit — jq would read a 50MB file whole.
+  [ "$(grep -m1 -o '"entrypoint":"[^"]*"' "$f" 2>/dev/null | cut -d'"' -f4)" = cli ] || continue
   path="$(jq -r 'select(.cwd) | .cwd' "$f" 2>/dev/null | head -1)"
   [ -d "$path" ] || continue            # moved or deleted since
   [ "$path" = "/" ] && continue         # started from root; nothing to resume into
