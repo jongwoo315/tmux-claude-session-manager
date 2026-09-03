@@ -466,6 +466,31 @@ function linkForks(nodes) {
   }
 }
 
+
+// 포크 원본을 tmux 세션 옵션으로 내보낸다 — picker 가 읽는다.
+//
+// 판정은 linkForks 가 transcript 를 읽어서 한다(uuid 겹침 + 파일 생성시각). 그걸
+// picker 쪽 bash 로 옮기면 두 가지가 걸린다: transcript 전수 스캔이 1.2초고, 단순
+// grep 은 그 uuid 를 언급만 한 transcript 까지 잡아 오탐이 난다. 이미 맞게 계산하고
+// 있는 곳에서 한 줄 써 주면 picker 는 @claude_git 읽듯 공짜로 읽는다. 사본이 갈릴
+// 일도 없다.
+//
+// 값이 바뀔 때만 쓴다. 이 함수는 SSE 틱마다 도는데 tmux 서버는 단일 스레드라,
+// 세션 수만큼 set-option 을 매 틱 치면 picker 의 list-sessions 가 그 뒤에 줄 선다.
+const forkPublished = new Map()
+function publishForks(nodes) {
+  for (const n of nodes) {
+    if (!n.id || n.kind === 'dispatcher') continue
+    const want = n.forkLabel || ''
+    if (forkPublished.get(n.id) === want) continue
+    forkPublished.set(n.id, want)
+    const args = want
+      ? ['set-option', '-t', n.id, '@claude_fork_of', want]
+      : ['set-option', '-qu', '-t', n.id, '@claude_fork_of']
+    run('tmux', args).catch(() => {})
+  }
+}
+
 function parsePicker(out) {
   const rows = []
   for (const line of out.split('\n')) {
@@ -552,6 +577,7 @@ async function snapshot() {
     n.forkOf = (n.forkOf && bySid.get(n.forkOf)) || null
     n.forkLabel = n.forkOf ? (nodes.find((p) => p.id === n.forkOf) || {}).label || '' : ''
   }
+  publishForks(nodes)
 
   const edges = []
   if (nodes.some((n) => n.kind === 'task')) {

@@ -501,7 +501,7 @@ emit_rows() {
   # (unit separator), NOT tab: tab is a whitespace IFS char, so an empty middle
   # field (e.g. orch sessions have no @claude_title) would collapse and shift the
   # remaining columns. \037 never appears in a name or path.
-  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}\037#{@claude_bg}\037#{@claude_git}\037#{@claude_link}')
+  fmt=$(printf '#{session_name}\037#{@claude_state}\037#{@claude_state_at}\037#{pane_pid}\037#{@claude_title}\037#{pane_current_path}\037#{window_activity}\037#{@claude_bg}\037#{@claude_git}\037#{@claude_link}\037#{@claude_fork_of}')
   # Filtered by tmux, not by a piped grep: -f evaluates the same prefix test
   # server-side and saves a fork per refresh (verified to select the identical 17
   # sessions). #{m:...} is a glob match, so the prefix needs a trailing *.
@@ -539,7 +539,7 @@ emit_rows() {
   # 밖으로 안 나가지만, 세는 단위가 렌더 하나라 그대로 맞다.
   FILLED=0
   GIT_FILL_MAX="$(get_tmux_option @claude_git_fill_max 3)"
-  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact bg gitcol linkcol; do
+  printf '%s\n' "$sessions" | while IFS=$'\037' read -r s state at pid ctitle path wact bg gitcol linkcol forkcol; do
     # A user ESC-interrupt ends the turn without firing ANY hook — Claude Code has
     # no interrupt event, and Stop only fires on a normal finish — so `working`
     # sticks (red) until the next prompt. Cross-check it against tmux's own
@@ -707,6 +707,19 @@ emit_rows() {
       *' '*) gitmark="${gitcol#* }" ;;   # 브랜치 뒤에 붙은 마커만
       *)     gitmark='.' ;;              # 브랜치뿐(깨끗함) 또는 repo 아님
     esac
+    # 포크는 parent 열을 워크트리 연결과 나눠 쓴다. 한 세션이 둘 다일 수는 있지만
+    # (워크트리 안에서 포크) 드물고, 그때는 포크 쪽이 더 알기 어려운 사실이라 이긴다.
+    #
+    # 이름과 표시를 띄어 둔다. 붙이면 "(f)" 가 이름의 일부처럼 읽히는데, 세션
+    # 제목에 실제로 괄호가 들어갈 수 있어서(tnt(old)) 더 그렇다.
+    #
+    # 값은 web-server 가 @claude_fork_of 에 써 준다 — 판정에 transcript 를 읽어야
+    # 해서 picker 에서 하면 1.2초가 든다. 웹서버가 안 떠 있으면 이 열이 비어 있을
+    # 뿐 깨지지 않는다.
+    #
+    # 지연 채움 뒤에 둔다. 그 블록이 linkcol 을 덮어쓰므로 앞에 두면 포크 표시가
+    # 사라진다.
+    [ -n "$forkcol" ] && linkcol="$forkcol (f)"
     pad_display "$gitmark" 6; GITCOL="$PADDED"
     pad_display "$title" 44
     printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "$GITCOL" "$linkcol" "$path" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
