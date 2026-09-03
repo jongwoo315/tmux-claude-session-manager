@@ -174,14 +174,14 @@ tmux set-option -t "$session" @claude_bg "$bg"
 [ "$new" != "$cur" ] && [ "$skip_stamp" = false ] &&
   tmux set-option -t "$session" @claude_state_at "$(date +%s)"
 
-# @claude_git — 브랜치 + 미커밋 파일 수(*N) + push 안 한 커밋 수(↑N).
+# @claude_git — 브랜치 + 미커밋 파일 수(*N) + push 안 한 커밋 수(^N).
 #
 # 여기서 재는 이유는 비용이다. picker 안에서 돌리면 목록을 그릴 때마다,
 # ctrl-x reload마다 세션 수만큼 git이 뜬다(19개에 200ms 실측). 훅은 턴 경계에서만
 # 도므로 턴당 1회고, picker는 @claude_state 읽듯 공짜로 읽는다.
 #
 # 브랜치만으로는 값이 얕다 — 워크트리 경로가 이미 브랜치 이름을 절반 담고 있다
-# (~/prv/.wt/95-search → feat/95-search). *N·↑N은 경로에 없는 정보라서,
+# (~/prv/.wt/95-search → feat/95-search). *N·^N은 경로에 없는 정보라서,
 # 「세션은 끝났는데 커밋이 안 올라갔다」가 목록에서 바로 보인다.
 gitdir="$(tmux display-message -pt "$session" '#{pane_current_path}' 2>/dev/null)"
 if br="$(git -C "$gitdir" rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
@@ -189,7 +189,7 @@ if br="$(git -C "$gitdir" rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
   [ "$n" -gt 0 ] && br="$br *$n"
   # @{u} 는 upstream이 없으면 실패한다. 새로 낸 브랜치가 그렇고, 그때는 조용히 뺀다.
   a="$(git -C "$gitdir" rev-list --count '@{u}..HEAD' 2>/dev/null)"
-  [ -n "$a" ] && [ "$a" -gt 0 ] && br="$br ↑$a"
+  [ -n "$a" ] && [ "$a" -gt 0 ] && br="$br ^$a"
   tmux set-option -t "$session" @claude_git "$br"
 
   # @claude_link — 워크트리면 메인 repo의 절대 경로, 메인이면 딸린 워크트리 수.

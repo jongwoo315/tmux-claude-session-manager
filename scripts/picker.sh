@@ -185,13 +185,40 @@ claude_subtrees() {
 # Assigning to a global (not echoing) keeps this fork-free; a $(...) per row would
 # reintroduce the forks the single-ps/single-tmux design removed.
 SPACES='                                                                  '
-pad_display() {
-  local s="$1" want="$2" chars bytes disp
-  chars=${#s}
+# 표시 폭 -> $DISPW. LC_ALL 을 여기 가둔다 — pad_display 안에서 켜면 이후의
+# ${t#?} 까지 바이트 단위가 되어 한글이 쪼개진다.
+_dispw() {
+  # 한 줄에 몰면 안 된다 — `local x="$1" c=${#x}` 는 set -u 아래서
+  # "x: unbound variable" 로 죽는다. 같은 local 문의 좌변은 아직 안 보인다.
+  local x="$1" c b
+  c=${#x}
   local LC_ALL=C
-  bytes=${#s}
-  disp=$(( chars + (bytes - chars) / 2 ))
-  if [ "$disp" -ge "$want" ]; then PADDED="$s"; else PADDED="$s${SPACES:0:$((want - disp))}"; fi
+  b=${#x}
+  DISPW=$(( c + (b - c) / 2 ))
+}
+
+# pad_display <문자열> <폭> [head|tail]
+#
+# 넘칠 때 자른다. 예전에는 그대로 뒀는데, 그러면 뒤 열이 통째로 밀린다 —
+# 2026-09-03 실측: git 열(폭 22)에 "feature/DEV-7015-cross-encoder-reranker *1"
+# 이 들어와 42 폭을 먹었고 링크·경로 열이 행마다 다른 자리에서 시작했다.
+#
+# 기본은 head — 앞을 남기고 뒤를 자른다. 모든 열이 같은 방향이라야 눈이 왼쪽
+# 끝만 훑어도 읽힌다. tail 은 반대로 앞을 버리는데, 지금 쓰는 열은 없다.
+pad_display() {
+  local s="$1" want="$2" keep="${3:-head}" t
+  _dispw "$s"
+  if [ "$DISPW" -le "$want" ]; then PADDED="$s${SPACES:0:$((want - DISPW))}"; return; fi
+  t="$s"
+  if [ "$keep" = tail ]; then
+    while _dispw "$t"; [ "$DISPW" -gt $((want - 2)) ] && [ -n "$t" ]; do t="${t#?}"; done
+    t="..$t"
+  else
+    while _dispw "$t"; [ "$DISPW" -gt $((want - 2)) ] && [ -n "$t" ]; do t="${t%?}"; done
+    t="$t.."
+  fi
+  _dispw "$t"
+  if [ "$DISPW" -lt "$want" ]; then PADDED="$t${SPACES:0:$((want - DISPW))}"; else PADDED="$t"; fi
 }
 
 # Every sessions/<pid>.json in ONE awk pass, emitting "pid mtime src sid name".
@@ -654,7 +681,7 @@ emit_rows() {
         gdirty=$(printf '%s\n' "$gst" | grep -vc '^##')
         gitcol="$gbr"
         [ "${gdirty:-0}" -gt 0 ] && gitcol="$gitcol *$gdirty"
-        [ -n "$gahead" ] && gitcol="$gitcol ↑$gahead"
+        [ -n "$gahead" ] && gitcol="$gitcol ^$gahead"
 
         # rev-parse 도 두 값을 한 번에 받는다.
         grp=$(git -C "$path" rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null)
@@ -671,8 +698,16 @@ emit_rows() {
       tmux set-option -t "$s" @claude_git "$gitcol" 2>/dev/null
       tmux set-option -t "$s" @claude_link "$linkcol" 2>/dev/null
     fi
-    [ "$gitcol" = '-' ] && gitcol='.'
-    pad_display "$gitcol" 22; GITCOL="$PADDED"
+    # 표시는 마커(*N ^N)만 남긴다. 브랜치는 경로 열의 워크트리 이름과 겹친다 —
+    # 2026-09-03 실측에서 값이 있던 3행이 3행 다 겹쳤고, 나머지 11행은 비어 있었다.
+    # state.sh 의 같은 자리 주석이 이미 "*N·^N 은 경로에 없는 정보"라고 적어 뒀다.
+    # @claude_git 에는 브랜치를 그대로 저장한다 — 저장값을 바꾸면 state.sh 도
+    # 같이 고쳐야 하고, 브랜치가 필요해지는 날 되살릴 데가 없어진다.
+    case "$gitcol" in
+      *' '*) gitmark="${gitcol#* }" ;;   # 브랜치 뒤에 붙은 마커만
+      *)     gitmark='.' ;;              # 브랜치뿐(깨끗함) 또는 repo 아님
+    esac
+    pad_display "$gitmark" 6; GITCOL="$PADDED"
     pad_display "$title" 44
     printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "$GITCOL" "$linkcol" "$path" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
   done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n | resolve_links
@@ -694,28 +729,60 @@ resolve_links() {
   local all row f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12
   all="$(cat)"
 
-  # 경로 -> 제목. 제목은 5번 열이라 이미 44 폭으로 패딩돼 있어 꼬리 공백을 뗀다.
-  local owners='' t
+  # 경로 -> 제목, 그리고 tmux 세션명 -> 제목. 제목은 5번 열이라 이미 44 폭으로
+  # 패딩돼 있어 꼬리 공백을 뗀다.
+  local owners='' names='' t
   while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
-    [ -n "$f8" ] || continue
     t="${f5%"${f5##*[![:space:]]}"}"
+    [ -n "$f2" ] && names="$names$f2"$'\037'"$t"$'\n'
+    [ -n "$f8" ] || continue
     owners="$owners$f8"$'\037'"$t"$'\n'
   done <<<"$all"
+
+  # orch 큐의 parent — `orch add` 를 돌린 tmux 세션이다. 경로 대조만으로는 거의
+  # 항상 실패한다: dispatcher 는 dispatch 루트(~/plab)에 앉아 있지 개별 repo
+  # 디렉터리에 있지 않아서, 메인 repo 경로를 cwd 로 쥔 세션이 아예 없다.
+  # 2026-09-03 실측 — 그래서 링크 열이 전부 repo 이름(new-plab-front,
+  # pf-policy-bot)으로 떨어져 있었다. 큐가 유일하게 맞는 출처다.
+  # 태스크 파일이 지워지면(orch rm) 이 값도 사라지므로 아래 경로 대조가 대안으로
+  # 남는다.
+  local parents
+  parents=$(LC_ALL=C awk '
+    function val(s) { sub(/^[^:]*:[ \t]*"/, "", s); sub(/"[ \t]*,?[ \t]*$/, "", s); return s }
+    { f=FILENAME
+      if (match($0, /"session"[ \t]*:[ \t]*"[^"]*"/)) S[f]=val(substr($0,RSTART,RLENGTH))
+      if (match($0, /"parent"[ \t]*:[ \t]*"[^"]*"/))  P[f]=val(substr($0,RSTART,RLENGTH)) }
+    END { for (f in S) if (S[f] != "" && (f in P) && P[f] != "") printf "%s\037%s\n", S[f], P[f] }
+  ' "$HOME"/.claude/orch/queue/task-*.json 2>/dev/null)
 
   while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
     case "$f7" in
       '>'*)
-        local m="${f7#>}" hit=''
+        local m="${f7#>}" hit='' pname='' op ot
+        # 1순위 — orch 가 기록한 부모 세션. 이 열이 답해야 하는 것이 그것이다.
         while IFS=$'\037' read -r op ot; do
-          [ "$op" = "$m" ] && { hit="$ot"; break; }
-        done <<<"$owners"
-        # 세션이 없으면 repo 이름으로 떨어뜨린다. "메인 세션 없음" 은 자리만
-        # 차지하고 어느 repo 인지 못 알려준다 — 이름이면 최소한 그건 답한다.
+          [ "$op" = "$f2" ] && { pname="$ot"; break; }
+        done <<<"$parents"
+        if [ -n "$pname" ]; then
+          while IFS=$'\037' read -r op ot; do
+            [ "$op" = "$pname" ] && { hit="$ot"; break; }
+          done <<<"$names"
+          # 부모 세션이 이미 죽었으면 tmux 이름이라도 보여준다
+          [ -z "$hit" ] && hit="$pname"
+        fi
+        # 2순위 — 메인 repo 를 cwd 로 쥔 세션. 그런 세션이 있을 때만 맞는다.
+        if [ -z "$hit" ]; then
+          while IFS=$'\037' read -r op ot; do
+            [ "$op" = "$m" ] && { hit="$ot"; break; }
+          done <<<"$owners"
+        fi
+        # 3순위 — repo 이름. "메인 세션 없음" 은 자리만 차지하고 어느 repo 인지
+        # 못 알려준다 — 이름이면 최소한 그건 답한다.
         f7="${hit:-${m##*/}}"
         ;;
       ''|'-') f7='.' ;;
     esac
-    pad_display "$f7" 20
+    pad_display "$f7" 30
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$f1" "$f2" "$f3" "$f4" "$f5" "$f6" "$PADDED" "$f9" "$f10" "$f11" "$f12"
   done <<<"$all"
@@ -802,15 +869,43 @@ fi
 pos_opt=()
 [ "$start_pos" -gt 0 ] && pos_opt=(--sync --bind="start:pos($start_pos)")
 
+# 열 제목. 행과 같은 폭·같은 탭 구조로 만들어야 자리가 맞는다 — 상태 칸은
+# "● waiting" 9칸, 나이는 %5s 우측 정렬이라 행의 printf 와 똑같이 찍는다.
+pad_display 'state' 9;    H_ST="$PADDED"
+pad_display 'session' 44; H_SE="$PADDED"
+pad_display 'git' 6;      H_GI="$PADDED"
+pad_display 'parent' 30;  H_PA="$PADDED"
+# 굵게로 안내 문구와 가른다. fzf 는 --ansi 가 켜져 있어 --header 안의 이스케이프를
+# 그대로 그린다. 앰버(256색 179) — 안내 문구의 흐린 청회색(109)과 색상이 갈리고,
+# 행의 상태 색(초록 idle · 분홍 working)과도 안 겹친다. 바꾸려면 이 코드만 고친다.
+HDR_COLS=$(printf '\033[1;38;5;179m%s\t%5s\t%s\t%s\t%s\t%s\033[0m' \
+  "$H_ST" 'age' "$H_SE" "$H_GI" "$H_PA" 'path')
+
+# @claude_fzf_options(~/.tmux.conf)의 --header 가 extra_opts 로 뒤에 붙어 스크립트의
+# --header 를 덮는다 — fzf 는 마지막 --header 를 쓴다. 그래서 그 값을 꺼내 첫 줄로
+# 삼고 열 제목을 아래에 붙여, 맨 끝에 한 번 더 준다. 폭은 이 스크립트가 정하므로
+# 열 제목은 여기 있어야 하고, 안내 문구는 사용자 설정이 이긴다.
+HDR_TEXT='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)'
+_i=0
+while [ "$_i" -lt "${#extra_opts[@]}" ]; do
+  case "${extra_opts[$_i]}" in
+    --header)   HDR_TEXT="${extra_opts[$((_i+1))]:-$HDR_TEXT}" ;;
+    --header=*) HDR_TEXT="${extra_opts[$_i]#--header=}" ;;
+  esac
+  _i=$((_i + 1))
+done
+
 sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6,7,8 \
-  --reverse --cycle --header='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)' \
+  --reverse --cycle \
   --preview="$PREVIEW_CMD" --preview-window='up,70%,follow' \
 	--bind="load:reload($self --list; sleep 2)" \
   --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
   --bind="ctrl-g:change-preview($PANE_CMD)" \
   --bind="ctrl-o:change-preview($PREVIEW_CMD)" \
   ${pos_opt[@]+"${pos_opt[@]}"} \
-  ${extra_opts[@]+"${extra_opts[@]}"})
+  ${extra_opts[@]+"${extra_opts[@]}"} \
+  --header="$HDR_TEXT
+$HDR_COLS")
 
 [ -z "$sel" ] && exit 0
 target=$(printf '%s' "$sel" | LC_ALL=C cut -f2)
