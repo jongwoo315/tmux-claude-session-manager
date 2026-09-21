@@ -448,11 +448,22 @@ function linkForks(nodes) {
     // chain: every head is the same copy, so the group is ordered but the arrow
     // inside it is a guess, and the guess made here is that they all came off the
     // root. Rarer than two forks of one session, which is what this gets right.
+    //
+    // Equal births do NOT prove a verbatim copy of the other's head either. Two
+    // forks taken after the same compaction both open with a copy of that one
+    // boundary record, timestamp included, so they tie on birth and share a uuid
+    // while neither is the other's origin — the parent's copy of the record sits
+    // deep in its file, not at its head. Measured: 7249/7629 compacted on 09-17,
+    // was forked 09-18 and again 09-21, and the second fork was drawn as a child
+    // of the first (0 of its 565 uuids exist only in the first fork; 410 are the
+    // parent's). Heads that continue from the same logicalParent are co-forks, so
+    // they are skipped here and signal B names the owner of that record instead.
     let origin = null
     let originBirth = Infinity
     for (const [sid, other] of heads) {
       if (sid === n.sid || other.dir !== h.dir) continue
       if (other.birth !== h.birth || other.fileBirth >= h.fileBirth) continue
+      if (h.logicalParent && other.logicalParent === h.logicalParent) continue
       let shared = false
       for (const u of h.uuids) {
         if (other.uuids.has(u)) { shared = true; break }
