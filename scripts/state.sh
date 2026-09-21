@@ -127,6 +127,50 @@ if [ ! -t 0 ]; then
   # working|waiting|idle, and a Stop-set idle here would let it close a task
   # mid-flight (the whole reason this branch exists).
   case "$new:$raw" in idle:*'"status":"running"'*) new=working; skip_stamp=true; bg=1 ;; esac
+
+  # ralph 루프가 이 Stop 을 막을 거면 idle 이 아니다.
+  #
+  # ralph-loop 의 stop-hook.sh 는 이 훅과 같은 Stop 에서 따로 돌아, 종료를 막고
+  # 같은 프롬프트를 다시 넣는다. 그 재개에는 UserPromptSubmit 이 안 뜬다. 그래서
+  # 여기서 쓴 idle 이 다음 PostToolUse 까지 남고, 도구 없이 오래 생각하는 반복이면
+  # 그동안 내내 idle 로 보였다 (실측: DEV-9051-judge-determinism 이
+  # "Crystallizing… 50m" 중에 idle. 09-16~09-21 로그에서 orch 세션 Stop 355 건 중
+  # 209 건이 stop_hook_active=true, idle 뒤 UserPromptSubmit 없이 다시 도구를 쓴
+  # 경우 16 건 중 14 건이 ralph 세션).
+  #
+  # 판정은 stop-hook.sh 와 같은 상태 파일을 본다. 두 훅이 동시에 돌아서 마지막
+  # 반복에서는 ralph 가 파일을 지우기 전에 여기서 읽을 수 있다 — 그때 working 으로
+  # 두면 영영 idle 이 안 되고 orch 가 태스크를 못 닫는다. 그래서 ralph 가 종료를
+  # 허락하는 정상 조건 둘(최대 반복 도달, completion promise)을 여기서도 따진다.
+  # 파일 손상 같은 나머지 종료 경로는 따라 하지 않는다 — 드물고, 그때는 working 이
+  # 한 턴 남았다가 다음 Stop 에서 풀린다.
+  #
+  # 반복 수는 ralph 가 올리기 전 값일 수도 후 값일 수도 있다. 후 값을 읽어 계속될
+  # 반복을 마지막으로 잘못 보면 idle 로 떨어진다 — 고치기 전 동작과 같아 안전한 쪽이다.
+  if [ "$new" = idle ]; then
+    IFS=$'\t' read -r rcwd hsess <<EOF
+$(printf '%s' "$raw" | jq -r '[.cwd // "", .session_id // ""] | @tsv' 2>/dev/null)
+EOF
+    rfile="$rcwd/.claude/ralph-loop.local.md"
+    if [ -n "$rcwd" ] && [ -f "$rfile" ]; then
+      fm=$(/usr/bin/sed -n '/^---$/,/^---$/{ /^---$/d; p; }' "$rfile")
+      rsess=$(printf '%s\n' "$fm" | /usr/bin/sed -n 's/^session_id: *//p')
+      riter=$(printf '%s\n' "$fm" | /usr/bin/sed -n 's/^iteration: *//p')
+      rmax=$(printf '%s\n' "$fm" | /usr/bin/sed -n 's/^max_iterations: *//p')
+      rprom=$(printf '%s\n' "$fm" | /usr/bin/sed -n 's/^completion_promise: *//p' | /usr/bin/sed 's/^"\(.*\)"$/\1/')
+      ralph=1
+      [ -n "$rsess" ] && [ "$rsess" != "$hsess" ] && ralph=0
+      case "$riter" in ''|*[!0-9]*) ralph=0 ;; esac
+      case "$rmax" in ''|*[!0-9]*) ralph=0 ;; esac
+      [ "$ralph" = 1 ] && [ "$rmax" -gt 0 ] && [ "$riter" -ge "$rmax" ] && ralph=0
+      if [ "$ralph" = 1 ] && [ -n "$rprom" ] && [ "$rprom" != null ]; then
+        said=$(printf '%s' "$raw" | jq -r '.last_assistant_message // ""' 2>/dev/null \
+          | perl -0777 -ne 'print $1 if /<promise>(.*?)<\/promise>/s' | perl -0777 -pe 's/^\s+|\s+$//g; s/\s+/ /g')
+        [ -n "$said" ] && [ "$said" = "$rprom" ] && ralph=0
+      fi
+      [ "$ralph" = 1 ] && { new=working; skip_stamp=true; }
+    fi
+  fi
 fi
 
 # 한 번의 display-message 로 둘을 같이 읽는다 — show-options 두 번이면 포크가 둘이다.
