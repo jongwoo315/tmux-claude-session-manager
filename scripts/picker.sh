@@ -185,6 +185,15 @@ claude_subtrees() {
 # Assigning to a global (not echoing) keeps this fork-free; a $(...) per row would
 # reintroduce the forks the single-ps/single-tmux design removed.
 SPACES='                                                                  '
+# 고정 목록 (sessionId 한 줄에 하나) 과 이름 앞에 붙는 표시.
+PIN_FILE="$HOME/.claude/picker-pins"
+PIN_MARK='⚑'
+# 표시(⚑ 와 행 색)는 fzf 화면에만 붙인다. --list 는 restart-all.sh·restore-reboot.sh·
+# web-server.js 도 읽는데, restart-all 은 제목 열로 세션을 되살려 이름을 붙인다 —
+# 표시가 섞이면 그 이름에 ⚑ 와 색 코드가 박힌다. 대화형 실행이 PICKER_DECOR=1 을
+# export 하고, fzf 가 띄우는 reload·transform 자식이 그걸 물려받는다.
+PICKER_DECOR="${PICKER_DECOR:-}"
+
 # 표시 폭 -> $DISPW. LC_ALL 을 여기 가둔다 — pad_display 안에서 켜면 이후의
 # ${t#?} 까지 바이트 단위가 되어 한글이 쪼개진다.
 _dispw() {
@@ -492,8 +501,16 @@ save_titles() {
 
 emit_rows() {
   local now fmt sessions roots root line i frozen frozen_rows idle_for prompt
-  local -a T_PID T_TITLE T_SID T_PROMPT
+  local -a T_PID T_TITLE T_SID T_PROMPT PINS
   now=$(date +%s)
+
+  # 고정한 sessionId 목록. 파일을 리다이렉트로
+  # 읽어 포크가 없다 — 이 함수는 2초마다 돈다.
+  if [ -r "$PIN_FILE" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] && PINS[${#PINS[@]}]="$line"
+    done < "$PIN_FILE"
+  fi
 
   # ONE tmux call for every field of every claude session (name, state, at, pane
   # pid, @claude_title, path) — replaces the per-row show-options x2 +
@@ -594,6 +611,16 @@ emit_rows() {
     working)    icon=$'\033[31m●\033[0m working' rank=4 ;; # red    - busy, leave it
     *)          icon=$'\033[90m●\033[0m   ?    ' rank=3 ;; # grey   - unknown (no hook yet)
     esac
+    # 고정한 세션은 맨 위 묶음. 묶음 안에서는 다른 행과 같은 규칙(state -> age)
+    # 으로 정렬한다 — 고정한 순서로 두면 맨 위만 다른 규칙이라 읽다가 걸린다.
+    # rank 를 100 내리면 아래 sort 가 그대로 처리한다. 행이 움직여도 묶음 밖으로는
+    # 안 나간다.
+    pinmark='  '
+    i=0
+    while [ -n "$sid" ] && [ "$i" -lt ${#PINS[@]} ]; do
+      [ "${PINS[$i]}" = "$sid" ] && { rank=$((rank - 100)); pinmark="$PIN_MARK "; break; }
+      i=$((i + 1))
+    done
     if [ -n "$at" ]; then ago="$(((now - at) / 60))m"; else ago='-'; fi
     # rank \t session \t icon \t age \t title(padded) \t path. Title is space-
     # padded (not tab) so fzf's 8-col tabstop doesn't jump the path column; 44 fits
@@ -721,7 +748,15 @@ emit_rows() {
     # 사라진다.
     [ -n "$forkcol" ] && linkcol="$forkcol (f)"
     pad_display "$gitmark" 6; GITCOL="$PADDED"
-    pad_display "$title" 44
+    # 표시는 패딩한 뒤에 붙인다. ⚑ 는 3바이트라 _dispw 가 2칸으로 세지만 실제로는
+    # 1칸이다 — 같이 재면 고정한 행만 열이 한 칸 당겨진다. 앞 두 칸은 모든 행이
+    # 쓰므로(고정 아니면 공백) 이름이 같은 자리에서 시작한다.
+    if [ -n "$PICKER_DECOR" ]; then
+      pad_display "$title" 42
+      PADDED="$pinmark$PADDED"
+    else
+      pad_display "$title" 44
+    fi
     printf '%s\t%s\t%s\t%5s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$s" "$icon" "$ago" "$PADDED" "$GITCOL" "$linkcol" "$path" "${path/#$HOME/~}" "$sid" "$frozen" "$frozen_rows"
   done | LC_ALL=C sort -t$'\t' -k1,1n -k4,4n | resolve_links
 }
@@ -739,7 +774,7 @@ emit_rows() {
 # 필드: 1=rank 2=session 3=icon 4=age 5=title 6=git 7=link 8=abs경로 9=표시경로
 #       10=sid 11=notice 12=notice행수. 8번(절대경로)은 여기서만 쓰고 지운다.
 resolve_links() {
-  local all row f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12
+  local all row f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 R Z=$'\033[0m'
   all="$(cat)"
 
   # 경로 -> 제목, 그리고 tmux 세션명 -> 제목. 제목은 5번 열이라 이미 44 폭으로
@@ -747,6 +782,7 @@ resolve_links() {
   local owners='' names='' t
   while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
     t="${f5%"${f5##*[![:space:]]}"}"
+    t="${t#"$PIN_MARK "}"; t="${t#  }"
     [ -n "$f2" ] && names="$names$f2"$'\037'"$t"$'\n'
     [ -n "$f8" ] || continue
     owners="$owners$f8"$'\037'"$t"$'\n'
@@ -796,9 +832,63 @@ resolve_links() {
       ''|'-') f7='.' ;;
     esac
     pad_display "$f7" 30
+    if [ -n "$PICKER_DECOR" ]; then
+      # 묶음마다 행 색. 밝기만 다르게 한다 — 색상을 쓰면 상태 점(초록·노랑·분홍·
+      # 청록)이나 열 제목(앰버)과 겹쳐 상태 표시로 읽힌다. 굵게도 안 쓴다 — fzf 가
+      # 커서 행을 굵게 그린다. 고정은 rank 가 음수(상태가 ? 여도 고정 색), ? 는 3.
+      # 상태 칸은 ● 뒤에 리셋이 있어 리셋마다 행 색을 다시 건다.
+      if [ "$f1" -lt 0 ]; then R=$'\033[97m'
+      elif [ "$f1" = 3 ]; then R=$'\033[38;5;240m'
+      else R=$'\033[38;5;250m'; fi
+      f3="$R${f3//$Z/$Z$R}$Z"; f4="$R$f4$Z"; f5="$R$f5$Z"; f6="$R$f6$Z"
+      PADDED="$R$PADDED$Z"; f9="$R$f9$Z"
+    fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$f1" "$f2" "$f3" "$f4" "$f5" "$f6" "$PADDED" "$f9" "$f10" "$f11" "$f12"
   done <<<"$all"
+}
+
+# 고정 상태는 sessionId 로 파일에 둔다. tmux 옵션(@claude_*)은 재부팅 복원
+# (restore-reboot.sh)에서 사라지지만 sessionId 는 --resume 뒤에도 같다.
+# 고정한 세션은 kill 하지 않는다 — 풀고 나서 죽인다.
+[ "${1:-}" = '--pin' ] && {
+  sid="${2:-}"
+  if [ -z "$sid" ]; then
+    tmux display-message "sessionId 를 모르는 세션이라 고정할 수 없다"
+  elif [ -r "$PIN_FILE" ] && grep -qxF "$sid" "$PIN_FILE"; then
+    grep -vxF "$sid" "$PIN_FILE" > "$PIN_FILE.tmp"
+    mv "$PIN_FILE.tmp" "$PIN_FILE"
+  else
+    printf '%s\n' "$sid" >> "$PIN_FILE"
+  fi
+  # fzf transform 으로 불린다 — 출력이 그대로 fzf 액션이 된다. 고정하면 행이 위로
+  # 옮겨 가는데 fzf 는 reload 뒤 커서를 같은 줄 번호에 둔다. track-current 는
+  # reload 를 넘어 행을 따라가지 않는다(0.67 실측). 그래서 새 목록에서 그 세션의
+  # 줄 번호를 세어 pos 로 옮긴 뒤 reload 한다 — 행 수가 같으니 커서가 그 줄에 남는다.
+  #
+  # 검색어가 있으면 하지 않는다. 그때 목록은 점수순이라 줄 번호가 안 맞는다.
+  n=0
+  if [ -z "${4:-}" ]; then
+    i=0
+    while IFS=$'\t' read -r _ name _; do
+      i=$((i + 1))
+      [ "$name" = "${3:-}" ] && { n=$i; break; }
+    done <<<"$(emit_rows)"
+  fi
+  if [ "$n" -gt 0 ]; then
+    printf 'pos(%s)+reload(%s --list)\n' "$n" "${BASH_SOURCE[0]}"
+  else
+    printf 'reload(%s --list)\n' "${BASH_SOURCE[0]}"
+  fi
+  exit 0
+}
+[ "${1:-}" = '--kill' ] && {
+  if [ -n "${3:-}" ] && [ -r "$PIN_FILE" ] && grep -qxF "$3" "$PIN_FILE"; then
+    tmux display-message "고정된 세션이다 — alt-p 로 먼저 푼다"
+  else
+    tmux kill-session -t "$2"
+  fi
+  exit 0
 }
 
 [ "${1:-}" = '--list' ] && {
@@ -868,6 +958,7 @@ trap 'printf "\033[0 q" >/dev/tty 2>/dev/null || true' EXIT
 #
 # A stale name (session since killed) simply never matches and the picker opens at
 # the top, which is the old behaviour.
+export PICKER_DECOR=1
 rows=$(emit_rows)
 [ -z "$rows" ] && exit 0
 last=$(tmux show-option -gqv @claude_last_session 2>/dev/null)
@@ -885,7 +976,7 @@ pos_opt=()
 # 열 제목. 행과 같은 폭·같은 탭 구조로 만들어야 자리가 맞는다 — 상태 칸은
 # "● waiting" 9칸, 나이는 %5s 우측 정렬이라 행의 printf 와 똑같이 찍는다.
 pad_display 'state' 9;    H_ST="$PADDED"
-pad_display 'session' 44; H_SE="$PADDED"
+pad_display 'session' 42; H_SE="  $PADDED"
 pad_display 'git' 6;      H_GI="$PADDED"
 pad_display 'parent' 30;  H_PA="$PADDED"
 # 굵게로 안내 문구와 가른다. fzf 는 --ansi 가 켜져 있어 --header 안의 이스케이프를
@@ -898,7 +989,7 @@ HDR_COLS=$(printf '\033[1;38;5;179m%s\t%5s\t%s\t%s\t%s\t%s\033[0m' \
 # --header 를 덮는다 — fzf 는 마지막 --header 를 쓴다. 그래서 그 값을 꺼내 첫 줄로
 # 삼고 열 제목을 아래에 붙여, 맨 끝에 한 번 더 준다. 폭은 이 스크립트가 정하므로
 # 열 제목은 여기 있어야 하고, 안내 문구는 사용자 설정이 이긴다.
-HDR_TEXT='Claude sessions · enter: jump · ctrl-x: kill  (rename via /rename in-session)'
+HDR_TEXT='Claude sessions · enter: jump · ctrl-x: kill · alt-p: pin  (rename via /rename in-session)'
 _i=0
 while [ "$_i" -lt "${#extra_opts[@]}" ]; do
   case "${extra_opts[$_i]}" in
@@ -912,7 +1003,8 @@ sel=$(printf '%s\n' "$rows" | fzf --ansi --delimiter='\t' --with-nth=3,4,5,6,7,8
   --reverse --cycle \
   --preview="$PREVIEW_CMD" --preview-window='up,70%,follow' \
 	--bind="load:reload($self --list; sleep 2)" \
-  --bind="ctrl-x:execute-silent(tmux kill-session -t {2})+reload($self --list)" \
+  --bind="ctrl-x:execute-silent($self --kill {2} {9})+reload($self --list)" \
+  --bind="alt-p:transform($self --pin {9} {2} {q})" \
   --bind="ctrl-g:change-preview($PANE_CMD)" \
   --bind="ctrl-o:change-preview($PREVIEW_CMD)" \
   ${pos_opt[@]+"${pos_opt[@]}"} \
