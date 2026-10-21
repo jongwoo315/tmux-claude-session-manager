@@ -41,4 +41,5 @@ tmux new-session -d -s "$session" -c "$path" "$cmd"
 # Default label so same-dir sessions are distinguishable in the picker.
 tmux set-option -t "$session" @claude_title "${path##*/}#$((n - 1))~fork"
 
-tmux display-popup -w "$w" -h "$h" -E "tmux attach-session -t $session"
+read -r pw ph px py < <(popup_geometry "$w" "$h")
+tmux display-popup -w "$pw" -h "$ph" -x "$px" -y "$py" -E "tmux attach-session -t $session"

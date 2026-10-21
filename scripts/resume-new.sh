@@ -42,4 +42,5 @@ tmux new-session -d -s "$session" -c "$path" "$cmd"
 # n-1 == the suffix used (1 for the base session, 2 for -2, ...).
 tmux set-option -t "$session" @claude_title "${path##*/}#$((n - 1))~resume"
 
-tmux display-popup -w "$w" -h "$h" -E "tmux attach-session -t $session"
+read -r pw ph px py < <(popup_geometry "$w" "$h")
+tmux display-popup -w "$pw" -h "$ph" -x "$px" -y "$py" -E "tmux attach-session -t $session"

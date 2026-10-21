@@ -27,4 +27,5 @@ if [ -z "$last" ] || ! tmux has-session -t "$last" 2>/dev/null; then
   exec "$DIR/list.sh" "$(tmux display-message -p '#{client_name}')"
 fi
 
-tmux display-popup -w "$w" -h "$h" -E "tmux attach-session -t $last"
+read -r pw ph px py < <(popup_geometry "$w" "$h")
+tmux display-popup -w "$pw" -h "$ph" -x "$px" -y "$py" -E "tmux attach-session -t $last"

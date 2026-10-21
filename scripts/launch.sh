@@ -24,4 +24,5 @@ tmux has-session -t "$session" 2>/dev/null ||
 
 [ -n "$window" ] && tmux set-option -t "$session" @claude_origin "$window"
 
-tmux display-popup -w "$w" -h "$h" -E "tmux attach-session -t $session"
+read -r pw ph px py < <(popup_geometry "$w" "$h")
+tmux display-popup -w "$pw" -h "$ph" -x "$px" -y "$py" -E "tmux attach-session -t $session"
